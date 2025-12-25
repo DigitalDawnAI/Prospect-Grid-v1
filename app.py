@@ -1,0 +1,348 @@
+"""
+ProspectGrid Flask API
+Wraps existing geocoder, streetview, and scorer modules
+"""
+
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+import uuid
+import csv
+import io
+import logging
+from datetime import datetime, timedelta
+from typing import List, Dict, Any
+import os
+
+from src.models import RawAddress, ScoredProperty, ProcessingStatus
+from src.geocoder import Geocoder
+from src.streetview import StreetViewFetcher
+from src.scorer import PropertyScorer
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+app = Flask(__name__)
+CORS(app)  # Allow frontend to call API
+
+# In-memory storage for MVP (replace with PostgreSQL later)
+# Structure: {session_id: {addresses: [...], campaign_id: str, email: str}}
+upload_sessions = {}
+# Structure: {campaign_id: {properties: [...], status: str, ...}}
+campaigns = {}
+
+# Initialize processors
+geocoder = Geocoder()
+streetview_fetcher = StreetViewFetcher()
+property_scorer = PropertyScorer()
+
+
+@app.route('/health', methods=['GET'])
+def health_check():
+    """Health check endpoint"""
+    return jsonify({"status": "ok", "timestamp": datetime.now().isoformat()})
+
+
+@app.route('/api/upload', methods=['POST'])
+def upload_csv():
+    """
+    Upload and validate CSV file
+    
+    Returns:
+        session_id, address_count, and validation results
+    """
+    try:
+        if 'file' not in request.files:
+            return jsonify({"error": "No file provided"}), 400
+        
+        file = request.files['file']
+        
+        if not file.filename.endswith('.csv'):
+            return jsonify({"error": "File must be a CSV"}), 400
+        
+        # Read CSV
+        stream = io.StringIO(file.stream.read().decode("UTF8"), newline=None)
+        csv_reader = csv.DictReader(stream)
+        
+        # Parse addresses
+        addresses = []
+        errors = []
+        
+        for idx, row in enumerate(csv_reader):
+            try:
+                # Support multiple CSV formats
+                if 'address' in row:
+                    raw_address = RawAddress(
+                        address=row['address'],
+                        city=row.get('city'),
+                        state=row.get('state'),
+                        zip=row.get('zip')
+                    )
+                elif 'street' in row:
+                    raw_address = RawAddress(
+                        address=row['street'],
+                        city=row.get('city'),
+                        state=row.get('state'),
+                        zip=row.get('zip')
+                    )
+                else:
+                    errors.append(f"Row {idx + 1}: Missing 'address' or 'street' column")
+                    continue
+                
+                addresses.append(raw_address.model_dump())
+            except Exception as e:
+                errors.append(f"Row {idx + 1}: {str(e)}")
+        
+        if not addresses:
+            return jsonify({"error": "No valid addresses found", "details": errors}), 400
+        
+        if len(addresses) > 500:
+            return jsonify({"error": "Maximum 500 addresses per upload"}), 400
+        
+        # Create session
+        session_id = str(uuid.uuid4())
+        upload_sessions[session_id] = {
+            "addresses": addresses,
+            "created_at": datetime.now().isoformat(),
+            "expires_at": (datetime.now() + timedelta(hours=24)).isoformat()
+        }
+        
+        return jsonify({
+            "session_id": session_id,
+            "address_count": len(addresses),
+            "errors": errors if errors else None
+        }), 200
+    
+    except Exception as e:
+        logger.error(f"Upload error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/estimate/<session_id>', methods=['GET'])
+def get_estimate(session_id: str):
+    """
+    Get cost estimate for a session
+    
+    Args:
+        session_id: Upload session ID
+    
+    Returns:
+        Cost breakdown for Street View only vs Full Scoring
+    """
+    try:
+        if session_id not in upload_sessions:
+            return jsonify({"error": "Session not found or expired"}), 404
+        
+        session = upload_sessions[session_id]
+        address_count = len(session['addresses'])
+        
+        # Cost calculation
+        geocoding_cost = address_count * 0.005
+        streetview_cost = address_count * 0.007
+        scoring_cost = address_count * 0.025
+        
+        streetview_only_total = geocoding_cost + streetview_cost
+        full_scoring_total = streetview_only_total + scoring_cost
+        
+        # Add 50% markup for revenue
+        return jsonify({
+            "address_count": address_count,
+            "costs": {
+                "streetview_only": {
+                    "subtotal": round(streetview_only_total, 2),
+                    "price": round(streetview_only_total * 1.5, 2)
+                },
+                "full_scoring": {
+                    "subtotal": round(full_scoring_total, 2),
+                    "price": round(full_scoring_total * 1.5, 2)
+                }
+            }
+        }), 200
+    
+    except Exception as e:
+        logger.error(f"Estimate error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/process/<session_id>', methods=['POST'])
+def start_processing(session_id: str):
+    """
+    Start processing a session after payment
+    
+    Request body:
+        {
+            "service_level": "streetview_only" | "full_scoring",
+            "email": "user@example.com",
+            "payment_intent_id": "pi_xxx" (Stripe payment)
+        }
+    
+    Returns:
+        campaign_id for tracking results
+    """
+    try:
+        if session_id not in upload_sessions:
+            return jsonify({"error": "Session not found or expired"}), 404
+        
+        data = request.json
+        service_level = data.get('service_level', 'full_scoring')
+        email = data.get('email')
+        payment_intent_id = data.get('payment_intent_id')
+        
+        # Create campaign
+        campaign_id = str(uuid.uuid4())
+        session = upload_sessions[session_id]
+        
+        campaigns[campaign_id] = {
+            "campaign_id": campaign_id,
+            "session_id": session_id,
+            "email": email,
+            "service_level": service_level,
+            "payment_intent_id": payment_intent_id,
+            "status": "processing",
+            "created_at": datetime.now().isoformat(),
+            "total_properties": len(session['addresses']),
+            "processed_count": 0,
+            "success_count": 0,
+            "failed_count": 0,
+            "properties": []
+        }
+        
+        # TODO: Queue background job for actual processing
+        # For now, we'll do synchronous processing (MVP)
+        process_campaign(campaign_id)
+        
+        return jsonify({
+            "campaign_id": campaign_id,
+            "status": "processing",
+            "estimated_time_minutes": len(session['addresses']) / 20  # ~20 properties/minute
+        }), 200
+    
+    except Exception as e:
+        logger.error(f"Processing start error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+def process_campaign(campaign_id: str):
+    """
+    Process all addresses in a campaign
+    This should be moved to a background worker (Celery/RQ)
+    """
+    campaign = campaigns[campaign_id]
+    session = upload_sessions[campaign['session_id']]
+    service_level = campaign['service_level']
+    
+    for raw_addr_dict in session['addresses']:
+        try:
+            # Convert dict back to RawAddress
+            raw_addr = RawAddress(**raw_addr_dict)
+            
+            # Step 1: Geocode
+            geocoded = geocoder.geocode(raw_addr)
+            if not geocoded:
+                campaign['failed_count'] += 1
+                campaign['properties'].append({
+                    "input_address": raw_addr.full_address,
+                    "status": "failed",
+                    "error_message": "Geocoding failed"
+                })
+                continue
+            
+            # Create ScoredProperty
+            prop = ScoredProperty.from_geocoded(geocoded, campaign_id)
+            
+            # Step 2: Get Street View
+            street_view = streetview_fetcher.fetch(geocoded)
+            if street_view:
+                prop.add_street_view(street_view)
+            else:
+                prop.processing_status = ProcessingStatus.NO_IMAGERY
+            
+            # Step 3: Score (if full_scoring and image available)
+            if service_level == 'full_scoring' and street_view and street_view.image_available:
+                score = property_scorer.score(street_view)
+                if score:
+                    prop.add_score(score)
+            
+            campaign['properties'].append(prop.model_dump())
+            campaign['processed_count'] += 1
+            if prop.processing_status == ProcessingStatus.COMPLETE:
+                campaign['success_count'] += 1
+            
+        except Exception as e:
+            logger.error(f"Error processing address: {e}")
+            campaign['failed_count'] += 1
+    
+    # Mark campaign as complete
+    campaign['status'] = 'complete'
+    campaign['completed_at'] = datetime.now().isoformat()
+
+
+@app.route('/api/status/<campaign_id>', methods=['GET'])
+def get_status(campaign_id: str):
+    """Get processing status for a campaign"""
+    try:
+        if campaign_id not in campaigns:
+            return jsonify({"error": "Campaign not found"}), 404
+        
+        campaign = campaigns[campaign_id]
+        
+        return jsonify({
+            "campaign_id": campaign_id,
+            "status": campaign['status'],
+            "total_properties": campaign['total_properties'],
+            "processed_count": campaign['processed_count'],
+            "success_count": campaign['success_count'],
+            "failed_count": campaign['failed_count'],
+            "progress_percent": round((campaign['processed_count'] / campaign['total_properties']) * 100, 1)
+        }), 200
+    
+    except Exception as e:
+        logger.error(f"Status check error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/results/<campaign_id>', methods=['GET'])
+def get_results(campaign_id: str):
+    """Get all scored properties for a campaign"""
+    try:
+        if campaign_id not in campaigns:
+            return jsonify({"error": "Campaign not found"}), 404
+        
+        campaign = campaigns[campaign_id]
+        
+        return jsonify({
+            "campaign_id": campaign_id,
+            "status": campaign['status'],
+            "total_properties": campaign['total_properties'],
+            "success_count": campaign['success_count'],
+            "failed_count": campaign['failed_count'],
+            "properties": campaign['properties']
+        }), 200
+    
+    except Exception as e:
+        logger.error(f"Results fetch error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/property/<campaign_id>/<int:property_index>', methods=['GET'])
+def get_property(campaign_id: str, property_index: int):
+    """Get single property details"""
+    try:
+        if campaign_id not in campaigns:
+            return jsonify({"error": "Campaign not found"}), 404
+        
+        campaign = campaigns[campaign_id]
+        
+        if property_index >= len(campaign['properties']):
+            return jsonify({"error": "Property not found"}), 404
+        
+        return jsonify(campaign['properties'][property_index]), 200
+    
+    except Exception as e:
+        logger.error(f"Property fetch error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+if __name__ == '__main__':
+    port = int(os.getenv('PORT', 5000))
+    app.run(host='0.0.0.0', port=port, debug=True)
