@@ -1,6 +1,14 @@
 # ProspectGrid Backend API
 
-Flask API that wraps existing ProspectGrid modules (geocoder, streetview, scorer).
+Flask REST API for AI-powered real estate property analysis with multi-angle Street View imagery and condition scoring.
+
+## Features
+
+- 🗺️ **Address Geocoding** - Convert addresses to precise coordinates
+- 📸 **Multi-Angle Street View** - Fetch 1 or 4 angles per property
+- 🤖 **AI Condition Scoring** - Claude Sonnet 4 analyzes property condition (1-10 scale)
+- 💰 **Flexible Service Tiers** - Choose between standard and premium options
+- 📊 **Real-time Progress** - Track processing status via API
 
 ## Setup
 
@@ -48,17 +56,38 @@ Response:
 {
   "address_count": 237,
   "costs": {
-    "streetview_only": {
+    "streetview_standard": {
       "subtotal": 2.84,
-      "price": 4.26
+      "price": 4.26,
+      "description": "1 optimized angle"
     },
-    "full_scoring": {
+    "streetview_premium": {
+      "subtotal": 9.95,
+      "price": 14.93,
+      "description": "4 angles (N, E, S, W)"
+    },
+    "full_scoring_standard": {
       "subtotal": 8.77,
-      "price": 13.16
+      "price": 13.16,
+      "description": "AI scoring + 1 angle"
+    },
+    "full_scoring_premium": {
+      "subtotal": 15.88,
+      "price": 23.82,
+      "description": "AI scoring + 4 angles"
     }
   }
 }
 ```
+
+## Service Tiers
+
+| Tier | Features | Cost/Property | Best For |
+|------|----------|---------------|----------|
+| **Street View Standard** | 1 optimized angle (135° SE) | ~$0.018 | Large batches, cost-sensitive |
+| **Street View Premium** | 4 angles (N, E, S, W) | ~$0.042 | High-value leads |
+| **Full Scoring Standard** ⭐ | AI scoring + 1 angle | ~$0.056 | Most common use case |
+| **Full Scoring Premium** | AI scoring + 4 angles | ~$0.079 | Premium leads |
 
 ### 3. Start Processing
 ```bash
@@ -66,7 +95,7 @@ POST /api/process/{session_id}
 Content-Type: application/json
 
 {
-  "service_level": "full_scoring",
+  "service_level": "streetview_standard" | "streetview_premium" | "full_scoring_standard" | "full_scoring_premium",
   "email": "user@example.com",
   "payment_intent_id": "pi_xxx"
 }
@@ -108,7 +137,7 @@ Response:
 ```json
 {
   "campaign_id": "uuid",
-  "status": "complete",
+  "status": "completed",
   "total_properties": 237,
   "success_count": 225,
   "failed_count": 12,
@@ -116,9 +145,19 @@ Response:
     {
       "address_full": "123 Main St, Atlantic City, NJ 08401",
       "prospect_score": 8,
-      "score_reasoning": "...",
-      "streetview_url": "...",
-      ...
+      "score_reasoning": "Moderate distress signals...",
+      "streetview_url": "https://maps.googleapis.com/...",
+      "streetview_urls_multi_angle": [
+        "https://maps.googleapis.com/...heading=0",
+        "https://maps.googleapis.com/...heading=90",
+        "https://maps.googleapis.com/...heading=180",
+        "https://maps.googleapis.com/...heading=270"
+      ],
+      "score_roof": 7,
+      "score_siding": 8,
+      "score_landscaping": 6,
+      "score_vacancy": 9,
+      "confidence": "high"
     }
   ]
 }

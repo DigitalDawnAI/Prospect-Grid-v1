@@ -338,5 +338,127 @@ https://web-production-a42df.up.railway.app
 
 ---
 
-**Last Updated**: December 25, 2025
-**Status**: ✅ Deployed and operational
+## Session: December 29-30, 2025 - Multi-Angle Street View & Service Tiers
+
+### What We Accomplished
+
+✅ **Security Incident Response**
+- Discovered exposed API keys in `.env.example` via GitGuardian alert
+- Regenerated all API keys (Google Maps, Anthropic, Airtable)
+- Fixed `.env.example` files across all repos with placeholders
+- Updated Railway environment variables with new keys
+- Cleaned up duplicate Railway deployments
+
+✅ **Backend Status Fix**
+- Fixed status mismatch: backend returned `"complete"` but frontend expected `"completed"`
+- Updated `app.py:276` to return consistent status
+- Tested status polling and auto-redirect to results page
+
+✅ **Multi-Angle Street View Feature** 🎯
+- **Problem**: Street View images showing random angles (wooded lots, streets instead of homes)
+- **Solution**: Implemented 2-tier Street View system with user choice
+
+**Backend Changes**:
+- Updated `StreetViewFetcher` to support `multi_angle` parameter
+- Fetch 4 images (N, E, S, W headings: 0°, 90°, 180°, 270°) for premium tier
+- Fetch 1 optimized image (SE heading: 135°) for standard tier
+- Updated data models to store `streetview_urls_multi_angle` array
+- Added service tier logic: standard vs premium
+
+**API Updates**:
+- New service levels: `streetview_standard`, `streetview_premium`, `full_scoring_standard`, `full_scoring_premium`
+- Updated cost calculations:
+  - Standard Street View: ~$0.018/property ($18 per 1,000)
+  - Premium Street View: ~$0.042/property ($42 per 1,000)
+  - Full Scoring Standard: ~$0.056/property ($56 per 1,000)
+  - Full Scoring Premium: ~$0.079/property ($79 per 1,000)
+
+✅ **Frontend Updates**
+- Updated estimate page with 4 service tier options
+- Added detailed descriptions and pricing for each tier
+- Built image gallery in results modal
+- Added N/E/S/W angle selector buttons
+- Visual indicator showing current angle (e.g., "Viewing: East angle (2 of 4)")
+
+✅ **Frontend Polish**
+- Fixed browser tab title from "v0 App" to "ProspectGrid - AI Property Analysis"
+- Built property detail modal with:
+  - Large Street View images (with gallery for premium)
+  - Full address with copy button
+  - Overall score display
+  - Component scores breakdown
+  - AI reasoning text
+  - Confidence level
+
+### Cost Comparison (1,000 properties)
+
+| Service Tier | Cost per Property | Total (1,000) | Use Case |
+|--------------|-------------------|---------------|----------|
+| Street View Standard | $0.018 | $18 | Large batches, cost-sensitive |
+| Street View Premium | $0.042 | $42 | High-value leads |
+| Full Scoring Standard | $0.056 | $56 | Most common use case ✅ |
+| Full Scoring Premium | $0.079 | $79 | Premium leads needing complete visibility |
+
+### Technical Implementation
+
+**Street View Fetcher** (`src/streetview.py`):
+```python
+def fetch(property, multi_angle=False):
+    if multi_angle:
+        # Fetch 4 angles (N, E, S, W)
+        headings = [0, 90, 180, 270]
+        urls = [construct_url(heading) for heading in headings]
+        return StreetViewImage(
+            image_url=urls[0],
+            image_urls_multi_angle=urls
+        )
+    else:
+        # Single optimized angle (SE - 135°)
+        url = construct_url(heading=135)
+        return StreetViewImage(image_url=url)
+```
+
+**Frontend Gallery** (`app/results/[campaign_id]/page.tsx`):
+- Displays N/E/S/W selector buttons when multi-angle available
+- Click to switch between angles
+- Shows current angle indicator
+
+### Deployment
+
+✅ **Backend** - Railway
+- URL: https://web-production-a42df.up.railway.app
+- Auto-deploys from `main` branch
+- Environment variables updated with new API keys
+
+✅ **Frontend** - Vercel
+- URL: https://www.prospect-grid.com
+- Auto-deploys from `main` branch
+- Custom domain configured via Cloudflare DNS
+
+### Files Modified
+
+**Backend**:
+- `src/streetview.py` - Multi-angle support
+- `src/models.py` - Added `streetview_urls_multi_angle` field
+- `app.py` - Service tier logic, updated costs, status fix
+
+**Frontend**:
+- `app/estimate/[session_id]/page.tsx` - 4 service tiers
+- `app/results/[campaign_id]/page.tsx` - Image gallery modal
+- `app/layout.tsx` - Fixed page title
+
+### Testing Results
+
+✅ **Status Fix**: Processing page now auto-redirects when complete
+✅ **Results Page**: Successfully displays scored properties
+✅ **Image Gallery**: Shows multiple angles when premium tier selected
+✅ **Service Tiers**: All 4 options display with correct pricing
+
+### Known Issues
+
+None - all features working as expected!
+
+---
+
+**Last Updated**: December 30, 2025
+**Status**: ✅ Deployed and operational with multi-angle Street View
