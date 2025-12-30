@@ -138,23 +138,45 @@ def get_estimate(session_id: str):
         
         # Cost calculation
         geocoding_cost = address_count * 0.005
-        streetview_cost = address_count * 0.007
+        streetview_cost_standard = address_count * 0.007  # 1 image
+        streetview_cost_premium = address_count * 0.028   # 4 images
         scoring_cost = address_count * 0.025
-        
-        streetview_only_total = geocoding_cost + streetview_cost
-        full_scoring_total = streetview_only_total + scoring_cost
-        
+
+        # Standard Street View (1 angle)
+        streetview_standard_total = geocoding_cost + streetview_cost_standard
+
+        # Premium Street View (4 angles)
+        streetview_premium_total = geocoding_cost + streetview_cost_premium
+
+        # Full AI Scoring (with standard street view)
+        full_scoring_standard_total = streetview_standard_total + scoring_cost
+
+        # Full AI Scoring (with premium street view)
+        full_scoring_premium_total = streetview_premium_total + scoring_cost
+
         # Add 50% markup for revenue
         return jsonify({
             "address_count": address_count,
             "costs": {
-                "streetview_only": {
-                    "subtotal": round(streetview_only_total, 2),
-                    "price": round(streetview_only_total * 1.5, 2)
+                "streetview_standard": {
+                    "subtotal": round(streetview_standard_total, 2),
+                    "price": round(streetview_standard_total * 1.5, 2),
+                    "description": "1 optimized angle"
                 },
-                "full_scoring": {
-                    "subtotal": round(full_scoring_total, 2),
-                    "price": round(full_scoring_total * 1.5, 2)
+                "streetview_premium": {
+                    "subtotal": round(streetview_premium_total, 2),
+                    "price": round(streetview_premium_total * 1.5, 2),
+                    "description": "4 angles (N, E, S, W)"
+                },
+                "full_scoring_standard": {
+                    "subtotal": round(full_scoring_standard_total, 2),
+                    "price": round(full_scoring_standard_total * 1.5, 2),
+                    "description": "AI scoring + 1 angle"
+                },
+                "full_scoring_premium": {
+                    "subtotal": round(full_scoring_premium_total, 2),
+                    "price": round(full_scoring_premium_total * 1.5, 2),
+                    "description": "AI scoring + 4 angles"
                 }
             }
         }), 200
@@ -168,35 +190,39 @@ def get_estimate(session_id: str):
 def start_processing(session_id: str):
     """
     Start processing a session after payment
-    
+
     Request body:
         {
-            "service_level": "streetview_only" | "full_scoring",
+            "service_level": "streetview_standard" | "streetview_premium" | "full_scoring_standard" | "full_scoring_premium",
             "email": "user@example.com",
             "payment_intent_id": "pi_xxx" (Stripe payment)
         }
-    
+
     Returns:
         campaign_id for tracking results
     """
     try:
         if session_id not in upload_sessions:
             return jsonify({"error": "Session not found or expired"}), 404
-        
+
         data = request.json
-        service_level = data.get('service_level', 'full_scoring')
+        service_level = data.get('service_level', 'full_scoring_standard')
         email = data.get('email')
         payment_intent_id = data.get('payment_intent_id')
-        
+
+        # Determine street view mode from service level
+        street_view_mode = "premium" if "premium" in service_level else "standard"
+
         # Create campaign
         campaign_id = str(uuid.uuid4())
         session = upload_sessions[session_id]
-        
+
         campaigns[campaign_id] = {
             "campaign_id": campaign_id,
             "session_id": session_id,
             "email": email,
             "service_level": service_level,
+            "street_view_mode": street_view_mode,
             "payment_intent_id": payment_intent_id,
             "status": "processing",
             "created_at": datetime.now().isoformat(),
@@ -230,12 +256,19 @@ def process_campaign(campaign_id: str):
     campaign = campaigns[campaign_id]
     session = upload_sessions[campaign['session_id']]
     service_level = campaign['service_level']
-    
+    street_view_mode = campaign.get('street_view_mode', 'standard')
+
+    # Determine if we need multi-angle images
+    multi_angle = (street_view_mode == 'premium')
+
+    # Determine if we need AI scoring
+    needs_scoring = 'full_scoring' in service_level
+
     for raw_addr_dict in session['addresses']:
         try:
             # Convert dict back to RawAddress
             raw_addr = RawAddress(**raw_addr_dict)
-            
+
             # Step 1: Geocode
             geocoded = geocoder.geocode(raw_addr)
             if not geocoded:
@@ -246,19 +279,19 @@ def process_campaign(campaign_id: str):
                     "error_message": "Geocoding failed"
                 })
                 continue
-            
+
             # Create ScoredProperty
             prop = ScoredProperty.from_geocoded(geocoded, campaign_id)
-            
+
             # Step 2: Get Street View
-            street_view = streetview_fetcher.fetch(geocoded)
+            street_view = streetview_fetcher.fetch(geocoded, multi_angle=multi_angle)
             if street_view:
                 prop.add_street_view(street_view)
             else:
                 prop.processing_status = ProcessingStatus.NO_IMAGERY
-            
+
             # Step 3: Score (if full_scoring and image available)
-            if service_level == 'full_scoring' and street_view and street_view.image_available:
+            if needs_scoring and street_view and street_view.image_available:
                 score = property_scorer.score(street_view)
                 if score:
                     prop.add_score(score)

@@ -29,16 +29,18 @@ class StreetViewFetcher:
         property: GeocodedProperty,
         size: str = "640x640",
         fov: int = 90,
-        pitch: int = 10
+        pitch: int = 10,
+        multi_angle: bool = False
     ) -> Optional[StreetViewImage]:
         """
-        Fetch Street View image for a property.
+        Fetch Street View image(s) for a property.
 
         Args:
             property: Geocoded property with coordinates
             size: Image size (default: 640x640)
             fov: Field of view in degrees (default: 90)
             pitch: Camera pitch (default: 10)
+            multi_angle: If True, fetch 4 images (N, S, E, W). If False, fetch 1 smart image.
 
         Returns:
             StreetViewImage if available, None otherwise
@@ -56,19 +58,61 @@ class StreetViewFetcher:
 
         image_available, image_date, pano_id = metadata
 
-        # Construct image URL
-        image_url = self._construct_image_url(location, size, fov, pitch)
+        if multi_angle:
+            # Fetch 4 images from different angles
+            image_urls = self._fetch_multi_angle_urls(location, size, fov, pitch)
+            # Use first image as primary
+            image_url = image_urls[0] if image_urls else ""
+            image_data = None  # Don't fetch data for multiple images
 
-        # Optionally fetch the actual image data
-        image_data = self._fetch_image_data(image_url)
+            return StreetViewImage(
+                image_url=image_url,
+                image_urls_multi_angle=image_urls,
+                image_data=image_data,
+                image_date=image_date,
+                pano_id=pano_id,
+                image_available=image_available
+            )
+        else:
+            # Fetch single image with smart heading (default to Southeast - 135°)
+            image_url = self._construct_image_url(location, size, fov, pitch, heading=135)
+            image_data = self._fetch_image_data(image_url)
 
-        return StreetViewImage(
-            image_url=image_url,
-            image_data=image_data,
-            image_date=image_date,
-            pano_id=pano_id,
-            image_available=image_available
-        )
+            return StreetViewImage(
+                image_url=image_url,
+                image_data=image_data,
+                image_date=image_date,
+                pano_id=pano_id,
+                image_available=image_available
+            )
+
+    def _fetch_multi_angle_urls(
+        self,
+        location: str,
+        size: str,
+        fov: int,
+        pitch: int
+    ) -> list[str]:
+        """
+        Fetch Street View image URLs from 4 cardinal directions.
+
+        Args:
+            location: Lat,lng string
+            size: Image size
+            fov: Field of view
+            pitch: Camera pitch
+
+        Returns:
+            List of 4 image URLs (North, East, South, West)
+        """
+        headings = [0, 90, 180, 270]  # N, E, S, W
+        urls = []
+
+        for heading in headings:
+            url = self._construct_image_url(location, size, fov, pitch, heading)
+            urls.append(url)
+
+        return urls
 
     def _check_metadata(self, location: str) -> Optional[Tuple[bool, Optional[str], Optional[str]]]:
         """

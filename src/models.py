@@ -88,6 +88,7 @@ class GeocodedProperty(BaseModel):
 class StreetViewImage(BaseModel):
     """Street View image metadata and data."""
     image_url: str
+    image_urls_multi_angle: Optional[list[str]] = None  # N, E, S, W angles
     image_data: Optional[bytes] = None
     image_date: Optional[str] = None  # Format: "YYYY-MM"
     pano_id: Optional[str] = None
@@ -152,6 +153,7 @@ class ScoredProperty(BaseModel):
 
     # Imagery
     streetview_url: Optional[str] = None
+    streetview_urls_multi_angle: Optional[list[str]] = None  # N, E, S, W angles
     streetview_date: Optional[str] = None
     image_available: bool = True
     imagery_stale: bool = False
@@ -187,6 +189,7 @@ class ScoredProperty(BaseModel):
     def add_street_view(self, street_view: StreetViewImage) -> None:
         """Add Street View data to property."""
         self.streetview_url = street_view.image_url
+        self.streetview_urls_multi_angle = street_view.image_urls_multi_angle
         self.streetview_date = street_view.image_date
         self.image_available = street_view.image_available
         self.imagery_stale = street_view.imagery_stale
