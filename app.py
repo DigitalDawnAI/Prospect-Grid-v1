@@ -273,7 +273,7 @@ def process_campaign(campaign_id: str):
             campaign['failed_count'] += 1
     
     # Mark campaign as complete
-    campaign['status'] = 'complete'
+    campaign['status'] = 'completed'
     campaign['completed_at'] = datetime.now().isoformat()
 
 
