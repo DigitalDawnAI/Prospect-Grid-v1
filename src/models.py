@@ -141,7 +141,7 @@ class ScoredProperty(BaseModel):
     latitude: float
     longitude: float
 
-    # Scoring
+    # Scoring (single angle - for backward compatibility and standard tier)
     prospect_score: Optional[int] = Field(None, ge=1, le=10)
     score_reasoning: Optional[str] = None
     score_roof: Optional[int] = Field(None, ge=1, le=10)
@@ -150,6 +150,9 @@ class ScoredProperty(BaseModel):
     score_vacancy: Optional[int] = Field(None, ge=1, le=10)
     scoring_model: Optional[str] = None
     confidence: Optional[ConfidenceLevel] = None
+
+    # Multi-angle scoring (premium tier - stores all 4 angle scores)
+    scores_by_angle: Optional[list[PropertyScore]] = None  # N, E, S, W angle scores
 
     # Imagery
     streetview_url: Optional[str] = None
@@ -195,7 +198,7 @@ class ScoredProperty(BaseModel):
         self.imagery_stale = street_view.imagery_stale
 
     def add_score(self, score: PropertyScore) -> None:
-        """Add scoring data to property."""
+        """Add scoring data to property (single angle)."""
         self.prospect_score = score.overall_score
         self.score_reasoning = score.reasoning
         self.score_roof = score.component_scores.roof
@@ -204,6 +207,27 @@ class ScoredProperty(BaseModel):
         self.score_vacancy = score.component_scores.vacancy_signals
         self.scoring_model = score.scoring_model
         self.confidence = score.confidence
+        self.processing_status = ProcessingStatus.COMPLETE
+        self.processed_date = datetime.now()
+        self.updated_at = datetime.now()
+
+    def add_scores_multi_angle(self, scores: list[PropertyScore]) -> None:
+        """Add multi-angle scoring data to property (N, E, S, W angles)."""
+        self.scores_by_angle = scores
+
+        # Also populate single-angle fields with the first valid score for backward compatibility
+        valid_scores = [s for s in scores if s is not None]
+        if valid_scores:
+            first_score = valid_scores[0]
+            self.prospect_score = first_score.overall_score
+            self.score_reasoning = first_score.reasoning
+            self.score_roof = first_score.component_scores.roof
+            self.score_siding = first_score.component_scores.siding
+            self.score_landscaping = first_score.component_scores.landscaping
+            self.score_vacancy = first_score.component_scores.vacancy_signals
+            self.scoring_model = first_score.scoring_model
+            self.confidence = first_score.confidence
+
         self.processing_status = ProcessingStatus.COMPLETE
         self.processed_date = datetime.now()
         self.updated_at = datetime.now()

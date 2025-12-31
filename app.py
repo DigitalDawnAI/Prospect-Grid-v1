@@ -16,7 +16,7 @@ import os
 from src.models import RawAddress, ScoredProperty, ProcessingStatus
 from src.geocoder import Geocoder
 from src.streetview import StreetViewFetcher
-from src.scorer import PropertyScorer
+from src.gemini_scorer import GeminiPropertyScorer
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -34,7 +34,7 @@ campaigns = {}
 # Initialize processors
 geocoder = Geocoder()
 streetview_fetcher = StreetViewFetcher()
-property_scorer = PropertyScorer()
+property_scorer = GeminiPropertyScorer()  # Using Gemini 2.0 Flash
 
 
 @app.route('/health', methods=['GET'])
@@ -140,7 +140,11 @@ def get_estimate(session_id: str):
         geocoding_cost = address_count * 0.005
         streetview_cost_standard = address_count * 0.007  # 1 image
         streetview_cost_premium = address_count * 0.028   # 4 images
-        scoring_cost = address_count * 0.025
+
+        # Gemini 2.0 Flash scoring costs (99.7% cheaper than Claude!)
+        gemini_cost_per_image = 0.000075
+        scoring_cost_standard = address_count * gemini_cost_per_image  # 1 image
+        scoring_cost_premium = address_count * (gemini_cost_per_image * 4)  # 4 images
 
         # Standard Street View (1 angle)
         streetview_standard_total = geocoding_cost + streetview_cost_standard
@@ -148,11 +152,11 @@ def get_estimate(session_id: str):
         # Premium Street View (4 angles)
         streetview_premium_total = geocoding_cost + streetview_cost_premium
 
-        # Full AI Scoring (with standard street view)
-        full_scoring_standard_total = streetview_standard_total + scoring_cost
+        # Full AI Scoring (with standard street view - 1 image scored)
+        full_scoring_standard_total = streetview_standard_total + scoring_cost_standard
 
-        # Full AI Scoring (with premium street view)
-        full_scoring_premium_total = streetview_premium_total + scoring_cost
+        # Full AI Scoring (with premium street view - 4 images scored)
+        full_scoring_premium_total = streetview_premium_total + scoring_cost_premium
 
         # Add 50% markup for revenue
         return jsonify({
@@ -171,12 +175,12 @@ def get_estimate(session_id: str):
                 "full_scoring_standard": {
                     "subtotal": round(full_scoring_standard_total, 2),
                     "price": round(full_scoring_standard_total * 1.5, 2),
-                    "description": "AI scoring + 1 angle"
+                    "description": "AI scoring (1 angle scored with Gemini 2.0 Flash)"
                 },
                 "full_scoring_premium": {
                     "subtotal": round(full_scoring_premium_total, 2),
                     "price": round(full_scoring_premium_total * 1.5, 2),
-                    "description": "AI scoring + 4 angles"
+                    "description": "AI scoring (4 angles scored with Gemini 2.0 Flash)"
                 }
             }
         }), 200
@@ -290,11 +294,18 @@ def process_campaign(campaign_id: str):
             else:
                 prop.processing_status = ProcessingStatus.NO_IMAGERY
 
-            # Step 3: Score (if full_scoring and image available)
+            # Step 3: Score with Gemini 2.0 Flash (all tiers now use Gemini)
             if needs_scoring and street_view and street_view.image_available:
-                score = property_scorer.score(street_view)
-                if score:
-                    prop.add_score(score)
+                # For premium tier with multi-angle, score all 4 angles
+                if multi_angle and street_view.image_urls_multi_angle:
+                    scores = property_scorer.score_multiple(street_view, street_view.image_urls_multi_angle)
+                    if scores and any(s is not None for s in scores):
+                        prop.add_scores_multi_angle(scores)
+                else:
+                    # For standard tier, score single image
+                    score = property_scorer.score(street_view)
+                    if score:
+                        prop.add_score(score)
             
             campaign['properties'].append(prop.model_dump())
             campaign['processed_count'] += 1
