@@ -701,7 +701,51 @@ street,city,state,zip
 3. Choose any service tier
 4. Process and view results
 
+### 🚨 Security: Maintenance Mode Added
+
+**Problem Discovered**: Site is live with no paywall - anyone can use it and charge to our API keys!
+
+**Solution Implemented**: Maintenance mode environment variable
+
+**Code Changes** (`app.py`):
+```python
+# Added to /api/upload and /api/process endpoints
+if os.getenv('MAINTENANCE_MODE', 'false').lower() == 'true':
+    return jsonify({
+        "error": "Service temporarily unavailable for maintenance. Please check back soon."
+    }), 503
+```
+
+**How to Enable/Disable**:
+
+**Enable** (lock down site):
+```bash
+# In Railway > Variables
+MAINTENANCE_MODE=true
+```
+
+**Disable** (allow usage):
+```bash
+# In Railway > Variables
+MAINTENANCE_MODE=false
+# OR delete the variable entirely
+```
+
+**What It Does**:
+- ✅ Blocks CSV uploads
+- ✅ Blocks processing requests
+- ✅ Prevents unauthorized API usage
+- ✅ Protects API keys from unexpected charges
+
+**Git Commit**: `25dca87` - "Add maintenance mode to protect API keys"
+
+**Next Steps**:
+- [ ] Implement Stripe payment integration
+- [ ] Add authentication/user accounts
+- [ ] Add rate limiting per IP/user
+- [ ] Set Google API spending caps
+
 ---
 
 **Last Updated**: December 31, 2025
-**Status**: ✅ Fully deployed with Gemini 2.0 Flash + CSV format standardized to "street" column
+**Status**: ✅ Deployed with maintenance mode | ⚠️ Enable MAINTENANCE_MODE=true in Railway to lock down site
