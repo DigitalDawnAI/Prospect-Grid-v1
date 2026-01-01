@@ -606,5 +606,102 @@ None - all features working as expected!
 
 ---
 
-**Last Updated**: December 30, 2025
-**Status**: ✅ Deployed with Gemini 2.0 Flash integration - 99.7% cost reduction on AI scoring!
+## Session: December 31, 2025 - API Key Setup & CSV Column Standardization
+
+### What We Accomplished
+
+✅ **Google API Key Setup**
+- Added `GOOGLE_API_KEY` environment variable for Gemini 2.0 Flash
+- Updated `.env.example` with clear documentation
+- User added API key to Railway environment variables
+- Backend and frontend both deployed and operational
+
+**Google Gemini Free Tier:**
+- 1,500 requests per day (completely free)
+- Standard tier: 1,500 properties/day free
+- Premium tier: 375 properties/day free (4 images each)
+- Gemini scoring essentially free for moderate usage!
+
+✅ **CSV Column Standardization**
+- **Changed required column**: `address` → `street`
+- **Reason**: Consistency and clarity in CSV format
+
+**Backend Changes** (`app.py`):
+- Removed support for `address` column
+- Now only accepts `street` column
+- Updated error message: "Missing 'street' column"
+
+**Frontend Changes** (`app/page.tsx`):
+- Updated homepage text: "Must include columns: Street, City, State, Zip"
+- Matches backend requirement
+
+**Documentation**:
+- Updated `claude.md` with new CSV format
+- Added screenshot to `docs/address-street.png` showing the change
+
+### CSV Format (Final)
+
+```csv
+street,city,state,zip
+123 Main St,Atlantic City,NJ,08401
+456 Oak Ave,Atlantic City,NJ,08401
+```
+
+### Git Commits
+
+**Backend**:
+- `48c266c` - Change CSV column from 'address' to 'street'
+- `7e8778e` - Update .env.example with GOOGLE_API_KEY
+- `a89c022` - Add docs folder with CSV format screenshot
+
+**Frontend**:
+- `2312767` - Update CSV column label from 'Address' to 'Street'
+
+### Deployment Status
+
+✅ **Backend** (Railway): https://web-production-a42df.up.railway.app
+- Environment variable `GOOGLE_API_KEY` configured
+- Auto-deployed from main branch
+- All changes live
+
+✅ **Frontend** (Vercel): https://www.prospect-grid.com
+- Homepage updated with new CSV format
+- Auto-deployed from main branch
+- All changes live
+
+### Current System Status
+
+**Tech Stack:**
+- Backend: Flask + Gemini 2.0 Flash vision API
+- Frontend: Next.js + React
+- Deployment: Railway (backend) + Vercel (frontend)
+
+**Service Tiers:**
+| Tier | Cost per 100 Properties | Features |
+|------|-------------------------|----------|
+| Street View Standard | ~$1.80 | 1 angle, no AI |
+| Street View Premium | ~$5.00 | 4 angles, no AI |
+| Full Scoring Standard | ~$1.80 | 1 angle + Gemini AI (FREE within daily limits) |
+| Full Scoring Premium | ~$5.00 | 4 angles + Gemini AI (FREE within daily limits) |
+
+**API Keys Required:**
+- ✅ `GOOGLE_MAPS_API_KEY` - Geocoding + Street View
+- ✅ `GOOGLE_API_KEY` - Gemini 2.0 Flash vision
+- ✅ `ANTHROPIC_API_KEY` - Legacy (not currently used)
+
+### Ready to Resume
+
+**All code is committed and pushed to GitHub:**
+- Backend: https://github.com/DigitalDawnAI/Prospect-Grid-v1
+- Frontend: https://github.com/DigitalDawnAI/prospect-grid-web
+
+**To test after restart:**
+1. Go to https://www.prospect-grid.com
+2. Upload CSV with format: `street,city,state,zip`
+3. Choose any service tier
+4. Process and view results
+
+---
+
+**Last Updated**: December 31, 2025
+**Status**: ✅ Fully deployed with Gemini 2.0 Flash + CSV format standardized to "street" column
