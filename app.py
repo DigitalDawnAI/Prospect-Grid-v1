@@ -47,11 +47,17 @@ def health_check():
 def upload_csv():
     """
     Upload and validate CSV file
-    
+
     Returns:
         session_id, address_count, and validation results
     """
     try:
+        # Check maintenance mode
+        if os.getenv('MAINTENANCE_MODE', 'false').lower() == 'true':
+            return jsonify({
+                "error": "Service temporarily unavailable for maintenance. Please check back soon."
+            }), 503
+
         if 'file' not in request.files:
             return jsonify({"error": "No file provided"}), 400
         
@@ -199,6 +205,12 @@ def start_processing(session_id: str):
         campaign_id for tracking results
     """
     try:
+        # Check maintenance mode
+        if os.getenv('MAINTENANCE_MODE', 'false').lower() == 'true':
+            return jsonify({
+                "error": "Service temporarily unavailable for maintenance. Please check back soon."
+            }), 503
+
         if session_id not in upload_sessions:
             return jsonify({"error": "Session not found or expired"}), 404
 
