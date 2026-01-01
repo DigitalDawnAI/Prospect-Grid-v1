@@ -96,7 +96,7 @@ POST /api/upload
 Content-Type: multipart/form-data
 
 # CSV format:
-address,city,state,zip
+street,city,state,zip
 123 Main St,Atlantic City,NJ,08401
 ```
 Response:

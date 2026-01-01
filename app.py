@@ -70,15 +70,8 @@ def upload_csv():
         
         for idx, row in enumerate(csv_reader):
             try:
-                # Support multiple CSV formats
-                if 'address' in row:
-                    raw_address = RawAddress(
-                        address=row['address'],
-                        city=row.get('city'),
-                        state=row.get('state'),
-                        zip=row.get('zip')
-                    )
-                elif 'street' in row:
+                # Require 'street' column
+                if 'street' in row:
                     raw_address = RawAddress(
                         address=row['street'],
                         city=row.get('city'),
@@ -86,7 +79,7 @@ def upload_csv():
                         zip=row.get('zip')
                     )
                 else:
-                    errors.append(f"Row {idx + 1}: Missing 'address' or 'street' column")
+                    errors.append(f"Row {idx + 1}: Missing 'street' column")
                     continue
                 
                 addresses.append(raw_address.model_dump())
