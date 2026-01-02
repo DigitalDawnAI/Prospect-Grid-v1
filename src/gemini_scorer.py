@@ -3,6 +3,7 @@
 import os
 import json
 import logging
+import time
 from typing import Optional, List
 from pathlib import Path
 import google.generativeai as genai
@@ -17,13 +18,14 @@ logger = logging.getLogger(__name__)
 class GeminiPropertyScorer:
     """Handles property condition scoring using Gemini 2.0 Flash vision model."""
 
-    def __init__(self, api_key: Optional[str] = None, model: str = "gemini-1.5-flash"):
+    def __init__(self, api_key: Optional[str] = None, model: str = "gemini-1.5-flash", rate_limit_delay: float = 4.0):
         """
         Initialize scorer with Google API key.
 
         Args:
             api_key: Google API key (or from environment)
             model: Gemini model to use (default: gemini-1.5-flash)
+            rate_limit_delay: Delay in seconds between API calls to avoid quota (default: 4.0 for 15 req/min)
         """
         self.api_key = api_key or os.getenv("GOOGLE_API_KEY") or os.getenv("GOOGLE_MAPS_API_KEY")
         if not self.api_key:
@@ -31,6 +33,7 @@ class GeminiPropertyScorer:
 
         genai.configure(api_key=self.api_key)
         self.model = genai.GenerativeModel(model)
+        self.rate_limit_delay = rate_limit_delay
 
         # Load scoring prompt
         prompt_path = Path(__file__).parent.parent / "prompts" / "scoring_v1.txt"
@@ -88,6 +91,11 @@ Score 10 = severe distress, 1 = excellent condition"""
 
             # Parse JSON response
             score_data = self._parse_response(response_text)
+
+            # Rate limiting: Wait before next API call to avoid quota
+            if self.rate_limit_delay > 0:
+                logger.info(f"Rate limiting: waiting {self.rate_limit_delay}s before next request...")
+                time.sleep(self.rate_limit_delay)
 
             if score_data:
                 return self._create_property_score(score_data)
