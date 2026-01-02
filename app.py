@@ -12,6 +12,7 @@ import logging
 from datetime import datetime, timedelta
 from typing import List, Dict, Any
 import os
+import stripe
 
 from src.models import RawAddress, ScoredProperty, ProcessingStatus
 from src.geocoder import Geocoder
@@ -35,6 +36,9 @@ campaigns = {}
 geocoder = Geocoder()
 streetview_fetcher = StreetViewFetcher()
 property_scorer = GeminiPropertyScorer()  # Using Gemini 2.0 Flash
+
+# Configure Stripe
+stripe.api_key = os.getenv('STRIPE_SECRET_KEY')
 
 
 @app.route('/health', methods=['GET'])
@@ -186,6 +190,180 @@ def get_estimate(session_id: str):
     
     except Exception as e:
         logger.error(f"Estimate error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/create-checkout-session', methods=['POST'])
+def create_checkout_session():
+    """
+    Create a Stripe checkout session for payment
+
+    Request body:
+        {
+            "session_id": "uuid",
+            "service_level": "streetview_standard" | "streetview_premium" | "full_scoring_standard" | "full_scoring_premium",
+            "email": "user@example.com"
+        }
+
+    Returns:
+        {
+            "checkout_url": "https://checkout.stripe.com/...",
+            "session_id": "cs_..."
+        }
+    """
+    try:
+        # Check maintenance mode
+        if os.getenv('MAINTENANCE_MODE', 'false').lower() == 'true':
+            return jsonify({
+                "error": "Service temporarily unavailable for maintenance. Please check back soon."
+            }), 503
+
+        data = request.json
+        upload_session_id = data.get('session_id')
+        service_level = data.get('service_level')
+        email = data.get('email')
+
+        if not upload_session_id or not service_level:
+            return jsonify({"error": "Missing required fields"}), 400
+
+        if upload_session_id not in upload_sessions:
+            return jsonify({"error": "Session not found or expired"}), 404
+
+        session = upload_sessions[upload_session_id]
+        address_count = len(session['addresses'])
+
+        # Calculate pricing (same logic as /api/estimate)
+        geocoding_cost = address_count * 0.005
+        streetview_cost_standard = address_count * 0.007
+        streetview_cost_premium = address_count * 0.028
+
+        gemini_cost_per_image = 0.000075
+        scoring_cost_standard = address_count * gemini_cost_per_image
+        scoring_cost_premium = address_count * (gemini_cost_per_image * 4)
+
+        # Calculate total based on service level
+        if service_level == "streetview_standard":
+            total = geocoding_cost + streetview_cost_standard
+        elif service_level == "streetview_premium":
+            total = geocoding_cost + streetview_cost_premium
+        elif service_level == "full_scoring_standard":
+            total = geocoding_cost + streetview_cost_standard + scoring_cost_standard
+        elif service_level == "full_scoring_premium":
+            total = geocoding_cost + streetview_cost_premium + scoring_cost_premium
+        else:
+            return jsonify({"error": "Invalid service level"}), 400
+
+        # Apply 50% markup
+        final_price = total * 1.5
+
+        # Convert to cents for Stripe (minimum $0.50)
+        amount_cents = max(int(final_price * 100), 50)
+
+        # Create Stripe checkout session
+        checkout_session = stripe.checkout.Session.create(
+            payment_method_types=['card'],
+            line_items=[{
+                'price_data': {
+                    'currency': 'usd',
+                    'product_data': {
+                        'name': f'ProspectGrid - {service_level.replace("_", " ").title()}',
+                        'description': f'AI property analysis for {address_count} properties',
+                    },
+                    'unit_amount': amount_cents,
+                },
+                'quantity': 1,
+            }],
+            mode='payment',
+            success_url=f'{request.host_url}processing/{{CHECKOUT_SESSION_ID}}',
+            cancel_url=f'{request.host_url}estimate/{upload_session_id}',
+            customer_email=email,
+            metadata={
+                'upload_session_id': upload_session_id,
+                'service_level': service_level,
+                'address_count': address_count
+            }
+        )
+
+        return jsonify({
+            "checkout_url": checkout_session.url,
+            "session_id": checkout_session.id
+        }), 200
+
+    except Exception as e:
+        logger.error(f"Checkout session creation error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/verify-payment/<stripe_session_id>', methods=['POST'])
+def verify_payment(stripe_session_id: str):
+    """
+    Verify Stripe payment and start processing
+
+    Args:
+        stripe_session_id: Stripe checkout session ID
+
+    Returns:
+        campaign_id for tracking results
+    """
+    try:
+        # Check maintenance mode
+        if os.getenv('MAINTENANCE_MODE', 'false').lower() == 'true':
+            return jsonify({
+                "error": "Service temporarily unavailable for maintenance. Please check back soon."
+            }), 503
+
+        # Retrieve the Stripe session
+        checkout_session = stripe.checkout.Session.retrieve(stripe_session_id)
+
+        # Verify payment was successful
+        if checkout_session.payment_status != 'paid':
+            return jsonify({"error": "Payment not completed"}), 400
+
+        # Get metadata
+        upload_session_id = checkout_session.metadata['upload_session_id']
+        service_level = checkout_session.metadata['service_level']
+
+        if upload_session_id not in upload_sessions:
+            return jsonify({"error": "Session not found or expired"}), 404
+
+        # Determine street view mode from service level
+        street_view_mode = "premium" if "premium" in service_level else "standard"
+
+        # Create campaign
+        campaign_id = str(uuid.uuid4())
+        session = upload_sessions[upload_session_id]
+
+        campaigns[campaign_id] = {
+            "campaign_id": campaign_id,
+            "session_id": upload_session_id,
+            "email": checkout_session.customer_email,
+            "service_level": service_level,
+            "street_view_mode": street_view_mode,
+            "payment_intent_id": checkout_session.payment_intent,
+            "stripe_session_id": stripe_session_id,
+            "status": "processing",
+            "created_at": datetime.now().isoformat(),
+            "total_properties": len(session['addresses']),
+            "processed_count": 0,
+            "success_count": 0,
+            "failed_count": 0,
+            "properties": []
+        }
+
+        # Start processing in background (for now, synchronous)
+        process_campaign(campaign_id)
+
+        return jsonify({
+            "campaign_id": campaign_id,
+            "status": "processing",
+            "estimated_time_minutes": len(session['addresses']) / 20
+        }), 200
+
+    except stripe.error.StripeError as e:
+        logger.error(f"Stripe error: {e}")
+        return jsonify({"error": "Payment verification failed"}), 400
+    except Exception as e:
+        logger.error(f"Payment verification error: {e}")
         return jsonify({"error": str(e)}), 500
 
 
