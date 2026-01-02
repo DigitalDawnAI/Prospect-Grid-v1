@@ -274,8 +274,8 @@ def create_checkout_session():
                 'quantity': 1,
             }],
             mode='payment',
-            success_url=f'{request.host_url}processing/{{CHECKOUT_SESSION_ID}}',
-            cancel_url=f'{request.host_url}estimate/{upload_session_id}',
+            success_url=f'https://www.prospect-grid.com/processing/{{CHECKOUT_SESSION_ID}}',
+            cancel_url=f'https://www.prospect-grid.com/estimate/{upload_session_id}',
             customer_email=email,
             metadata={
                 'upload_session_id': upload_session_id,
