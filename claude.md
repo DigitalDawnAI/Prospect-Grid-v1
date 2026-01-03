@@ -489,22 +489,23 @@ None - all features working as expected!
 - Premium tier: scores all 4 images individually
 - Calls `score_multiple()` for premium tier with all 4 image URLs
 
-✅ **Updated Pricing Calculations**
-- Gemini cost: $0.000075 per image
-- Standard tier (1 image): $0.000075
-- Premium tier (4 images): $0.0003
+✅ **Updated Pricing Calculations** ⚠️ (Later corrected - see Jan 3, 2026 session)
+- ~~Gemini cost: $0.000075 per image~~ **← INCORRECT** (was initial estimate)
+- **Actual Gemini cost: $0.00027 per image** (corrected Jan 3, 2026)
+- Standard tier (1 image): $0.00027
+- Premium tier (4 images): $0.00108
 - Updated cost estimates in `/api/estimate` endpoint
 
-### New Cost Comparison (with Gemini 2.0 Flash)
+### Cost Comparison (with Gemini 2.0 Flash) - CORRECTED Jan 3, 2026
 
 | Service Tier | API Costs | With 50% Markup | Savings vs Claude |
 |--------------|-----------|-----------------|-------------------|
 | Street View Standard | $0.012 | **$0.018** | - |
 | Street View Premium | $0.033 | **$0.050** | - |
-| Full Scoring Standard | $0.012 | **$0.018** | 68% cheaper |
-| Full Scoring Premium | $0.033 | **$0.050** | 37% cheaper |
+| Full Scoring Standard | $0.01227 | **$0.018** | 68% cheaper |
+| Full Scoring Premium | $0.03408 | **$0.051** | 37% cheaper |
 
-**Key insight**: Full Scoring Standard is now the **same price** as Street View Standard!
+**Key insight**: Full Scoring Standard is still the **same price** as Street View Standard!
 
 ### Frontend Changes
 
@@ -551,7 +552,9 @@ None - all features working as expected!
 
 **Gemini 2.0 Flash Model**:
 - Model ID: `gemini-2.0-flash` (stable production version, replacing deprecated `gemini-2.0-flash-exp`)
-- Input cost: $0.000075 per image
+- Input cost: $0.10 per 1M tokens (~1,340 tokens per image = $0.000134)
+- Output cost: $0.40 per 1M tokens (~350 tokens per response = $0.000140)
+- **Total cost per image**: ~$0.00027 (input + output)
 - Response format: JSON with same structure as Claude
 - API: `google-generativeai` Python SDK
 
@@ -740,12 +743,162 @@ MAINTENANCE_MODE=false
 **Git Commit**: `25dca87` - "Add maintenance mode to protect API keys"
 
 **Next Steps**:
-- [ ] Implement Stripe payment integration
+- [x] Implement Stripe payment integration
 - [ ] Add authentication/user accounts
 - [ ] Add rate limiting per IP/user
 - [ ] Set Google API spending caps
 
 ---
 
-**Last Updated**: December 31, 2025
-**Status**: ✅ Deployed with maintenance mode | ⚠️ Enable MAINTENANCE_MODE=true in Railway to lock down site
+## Session: January 3, 2026 - Gemini Vision API Fix & Accurate Pricing 💰
+
+### What We Accomplished
+
+✅ **Fixed Gemini Vision API**
+- **Problem**: Vision API completely broken with 404 error: `models/gemini-1.5-flash is not found for API version v1beta`
+- **Root Cause**: Model `gemini-1.5-flash` was deprecated/unavailable for the v1beta API
+- **Solution**: Switched to stable production model `gemini-2.0-flash`
+
+**Code Changes**:
+- Updated `src/gemini_scorer.py:21` - Changed default model from `gemini-1.5-flash` to `gemini-2.0-flash`
+- Model now uses: `gemini-2.0-flash` (stable production version)
+
+✅ **Corrected Pricing Calculations**
+- **Problem**: Documentation significantly underestimated Gemini costs ($0.000075 vs actual $0.00027 per image)
+- **Solution**: Updated all pricing calculations with accurate token-based costs
+
+### Accurate Gemini 2.0 Flash Pricing (2026)
+
+**API Rates**:
+- Input tokens: $0.10 per 1M tokens
+- Output tokens: $0.40 per 1M tokens
+
+**Per Image Cost** (typical Street View image):
+- Image: ~1,290 tokens
+- Scoring prompt: ~50 tokens
+- JSON response: ~350 tokens
+- **Total: ~$0.00027 per image**
+
+**Free Tier Limits**:
+- 15 requests per minute (RPM)
+- 1 million tokens per minute (TPM)
+- 1,500 requests per day (RPD)
+
+### Service Tier Pricing Breakdown
+
+#### 🔵 Street View Standard - 1 Optimized Angle
+
+**Features**:
+- Geocoding + 1 optimized Street View image
+- Image availability check
+- Best for large batches
+
+**API Costs**:
+- Geocoding: $0.005
+- Street View (1 image): $0.007
+- **Subtotal**: $0.012
+- **Price (50% markup)**: $0.018/property
+
+**Per 1,000 properties**: $18
+
+---
+
+#### 🟣 Street View Premium - 4 Angles (N, E, S, W)
+
+**Features**:
+- Geocoding + 4 angles (N, E, S, W)
+- Guaranteed property visibility
+- Best for high-value leads
+
+**API Costs**:
+- Geocoding: $0.005
+- Street View (4 images): $0.028
+- **Subtotal**: $0.033
+- **Price (50% markup)**: $0.050/property
+
+**Per 1,000 properties**: $50
+
+---
+
+#### 🟢 Full Scoring Standard - AI Scoring (1 Angle)
+
+**Features**:
+- AI condition analysis (1-10 scale)
+- Component scores (roof, siding, landscaping, vacancy)
+- 1 optimized Street View angle
+- Acquisition priority ranking
+
+**API Costs**:
+- Geocoding: $0.005
+- Street View (1 image): $0.007
+- Gemini scoring (1 image): $0.00027
+- **Subtotal**: $0.01227
+- **Price (50% markup)**: $0.018/property
+
+**Per 1,000 properties**: $18
+
+---
+
+#### 🟡 Full Scoring Premium - AI Scoring (4 Angles)
+
+**Features**:
+- AI condition analysis (1-10 scale)
+- Component scores (roof, siding, landscaping, vacancy)
+- 4 Street View angles (N, E, S, W)
+- Complete property visibility + scoring
+
+**API Costs**:
+- Geocoding: $0.005
+- Street View (4 images): $0.028
+- Gemini scoring (4 images): $0.00108
+- **Subtotal**: $0.03408
+- **Price (50% markup)**: $0.051/property
+
+**Per 1,000 properties**: $51
+
+---
+
+### Pricing Comparison Table
+
+| Service Tier | Cost/Property | Cost/100 | Cost/1,000 | Best For |
+|--------------|---------------|----------|------------|----------|
+| **Street View Standard** | $0.018 | $1.80 | $18 | Large batches, cost-sensitive |
+| **Street View Premium** | $0.050 | $5.00 | $50 | High-value leads, complete visibility |
+| **Full Scoring Standard** ⭐ | $0.018 | $1.80 | $18 | Most common use case |
+| **Full Scoring Premium** | $0.051 | $5.10 | $51 | Premium leads + AI insights |
+
+### Key Insights
+
+💡 **Full Scoring Standard is the same price as Street View Standard!**
+- Thanks to Gemini 2.0 Flash's low cost, AI scoring is essentially free
+- Gemini adds only $0.00027 per image vs $0.007 for Street View
+
+💡 **Free Tier is Extremely Generous**
+- Standard tier: Up to 1,500 properties/day FREE
+- Premium tier: Up to 375 properties/day FREE
+
+### Git Commits
+
+**Backend**: `076d69c` - Fix Gemini vision API by switching to stable gemini-2.0-flash model
+- Fixed 404 error with gemini-1.5-flash
+- Updated to stable production model
+- Corrected pricing calculations in app.py
+
+### Deployment Status
+
+✅ **Backend** (Railway): Auto-deploys from `claude/fix-vision-api-So3Fv` branch
+- Vision API now working with `gemini-2.0-flash`
+- Pricing calculations updated
+- URL: https://web-production-a42df.up.railway.app
+
+### Files Modified
+
+**Backend**:
+- `src/gemini_scorer.py` - Updated model to `gemini-2.0-flash`
+- `app.py` - Corrected Gemini pricing from $0.000075 to $0.00027 per image
+- `claude.md` - Added accurate pricing breakdown and session notes
+
+---
+
+**Last Updated**: January 3, 2026
+**Status**: ✅ Vision API fixed | ✅ Accurate pricing implemented

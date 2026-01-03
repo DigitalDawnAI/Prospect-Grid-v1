@@ -144,8 +144,10 @@ def get_estimate(session_id: str):
         streetview_cost_standard = address_count * 0.007  # 1 image
         streetview_cost_premium = address_count * 0.028   # 4 images
 
-        # Gemini 2.0 Flash scoring costs (99.7% cheaper than Claude!)
-        gemini_cost_per_image = 0.000075
+        # Gemini 2.0 Flash scoring costs
+        # Based on ~1,290 tokens per image + 50 token prompt = 1,340 input tokens @ $0.10/1M
+        # Plus ~350 output tokens @ $0.40/1M = ~$0.00027 per image
+        gemini_cost_per_image = 0.00027
         scoring_cost_standard = address_count * gemini_cost_per_image  # 1 image
         scoring_cost_premium = address_count * (gemini_cost_per_image * 4)  # 4 images
 
@@ -237,7 +239,8 @@ def create_checkout_session():
         streetview_cost_standard = address_count * 0.007
         streetview_cost_premium = address_count * 0.028
 
-        gemini_cost_per_image = 0.000075
+        # Gemini 2.0 Flash: ~$0.00027 per image (input + output tokens)
+        gemini_cost_per_image = 0.00027
         scoring_cost_standard = address_count * gemini_cost_per_image
         scoring_cost_premium = address_count * (gemini_cost_per_image * 4)
 
