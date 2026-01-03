@@ -550,7 +550,7 @@ None - all features working as expected!
 ### Technical Details
 
 **Gemini 2.0 Flash Model**:
-- Model ID: `gemini-2.0-flash-exp`
+- Model ID: `gemini-2.0-flash` (stable production version, replacing deprecated `gemini-2.0-flash-exp`)
 - Input cost: $0.000075 per image
 - Response format: JSON with same structure as Claude
 - API: `google-generativeai` Python SDK

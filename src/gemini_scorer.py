@@ -18,13 +18,13 @@ logger = logging.getLogger(__name__)
 class GeminiPropertyScorer:
     """Handles property condition scoring using Gemini 2.0 Flash vision model."""
 
-    def __init__(self, api_key: Optional[str] = None, model: str = "gemini-1.5-flash", rate_limit_delay: float = 4.0):
+    def __init__(self, api_key: Optional[str] = None, model: str = "gemini-2.0-flash", rate_limit_delay: float = 4.0):
         """
         Initialize scorer with Google API key.
 
         Args:
             api_key: Google API key (or from environment)
-            model: Gemini model to use (default: gemini-1.5-flash)
+            model: Gemini model to use (default: gemini-2.0-flash)
             rate_limit_delay: Delay in seconds between API calls to avoid quota (default: 4.0 for 15 req/min)
         """
         self.api_key = api_key or os.getenv("GOOGLE_API_KEY") or os.getenv("GOOGLE_MAPS_API_KEY")
