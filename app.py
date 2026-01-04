@@ -8,11 +8,14 @@ from flask_cors import CORS
 import uuid
 import csv
 import io
+import json
 import logging
 from datetime import datetime, timedelta
 from typing import List, Dict, Any
+from pathlib import Path
 import os
 import stripe
+import atexit
 
 from src.models import RawAddress, ScoredProperty, ProcessingStatus
 from src.geocoder import Geocoder
@@ -26,11 +29,56 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 CORS(app)  # Allow frontend to call API
 
-# In-memory storage for MVP (replace with PostgreSQL later)
+# Persistent storage directory
+STORAGE_DIR = Path("data")
+STORAGE_DIR.mkdir(exist_ok=True)
+SESSIONS_FILE = STORAGE_DIR / "upload_sessions.json"
+CAMPAIGNS_FILE = STORAGE_DIR / "campaigns.json"
+
+# In-memory storage with disk persistence
 # Structure: {session_id: {addresses: [...], campaign_id: str, email: str}}
 upload_sessions = {}
 # Structure: {campaign_id: {properties: [...], status: str, ...}}
 campaigns = {}
+
+def load_storage():
+    """Load sessions and campaigns from disk on startup."""
+    global upload_sessions, campaigns
+
+    try:
+        if SESSIONS_FILE.exists():
+            with open(SESSIONS_FILE, 'r') as f:
+                upload_sessions = json.load(f)
+                logger.info(f"Loaded {len(upload_sessions)} upload sessions from disk")
+    except Exception as e:
+        logger.error(f"Failed to load upload sessions: {e}")
+        upload_sessions = {}
+
+    try:
+        if CAMPAIGNS_FILE.exists():
+            with open(CAMPAIGNS_FILE, 'r') as f:
+                campaigns = json.load(f)
+                logger.info(f"Loaded {len(campaigns)} campaigns from disk")
+    except Exception as e:
+        logger.error(f"Failed to load campaigns: {e}")
+        campaigns = {}
+
+def save_storage():
+    """Save sessions and campaigns to disk."""
+    try:
+        with open(SESSIONS_FILE, 'w') as f:
+            json.dump(upload_sessions, f, indent=2)
+        with open(CAMPAIGNS_FILE, 'w') as f:
+            json.dump(campaigns, f, indent=2)
+        logger.info("Saved storage to disk")
+    except Exception as e:
+        logger.error(f"Failed to save storage: {e}")
+
+# Load existing data on startup
+load_storage()
+
+# Save data on shutdown
+atexit.register(save_storage)
 
 # Initialize processors
 geocoder = Geocoder()
@@ -109,7 +157,10 @@ def upload_csv():
             "created_at": datetime.now().isoformat(),
             "expires_at": (datetime.now() + timedelta(hours=24)).isoformat()
         }
-        
+
+        # Persist to disk
+        save_storage()
+
         return jsonify({
             "session_id": session_id,
             "address_count": len(addresses),
@@ -320,11 +371,20 @@ def verify_payment(stripe_session_id: str):
             return jsonify({"error": "Payment not completed"}), 400
 
         # Get metadata
-        upload_session_id = checkout_session.metadata['upload_session_id']
-        service_level = checkout_session.metadata['service_level']
+        upload_session_id = checkout_session.metadata.get('upload_session_id')
+        service_level = checkout_session.metadata.get('service_level')
+
+        if not upload_session_id:
+            logger.error("Missing upload_session_id in Stripe metadata")
+            return jsonify({"error": "Invalid payment session - missing session ID"}), 400
 
         if upload_session_id not in upload_sessions:
-            return jsonify({"error": "Session not found or expired"}), 404
+            logger.error(f"Upload session {upload_session_id} not found. Available sessions: {list(upload_sessions.keys())[:5]}")
+            return jsonify({
+                "error": "Session not found or expired",
+                "details": "Your upload session may have expired. Please try uploading your file again.",
+                "session_id": upload_session_id
+            }), 404
 
         # Determine street view mode from service level
         street_view_mode = "premium" if "premium" in service_level else "standard"
@@ -349,6 +409,9 @@ def verify_payment(stripe_session_id: str):
             "failed_count": 0,
             "properties": []
         }
+
+        # Persist to disk
+        save_storage()
 
         # Start processing in background (for now, synchronous)
         process_campaign(campaign_id)
@@ -419,7 +482,10 @@ def start_processing(session_id: str):
             "failed_count": 0,
             "properties": []
         }
-        
+
+        # Persist to disk
+        save_storage()
+
         # TODO: Queue background job for actual processing
         # For now, we'll do synchronous processing (MVP)
         process_campaign(campaign_id)
@@ -502,6 +568,9 @@ def process_campaign(campaign_id: str):
     # Mark campaign as complete
     campaign['status'] = 'completed'
     campaign['completed_at'] = datetime.now().isoformat()
+
+    # Persist final state to disk
+    save_storage()
 
 
 @app.route('/api/status/<campaign_id>', methods=['GET'])

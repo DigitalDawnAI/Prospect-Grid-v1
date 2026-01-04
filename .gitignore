@@ -28,3 +28,6 @@ htmlcov/
 
 # Logs
 *.log
+
+# Data storage (sessions and campaigns)
+data/
