@@ -161,28 +161,28 @@ def get_estimate(session_id: str):
         # Full AI Scoring (with premium street view - 4 images scored)
         full_scoring_premium_total = streetview_premium_total + scoring_cost_premium
 
-        # Add 50% markup for revenue
+        # At-cost pricing (no markup)
         return jsonify({
             "address_count": address_count,
             "costs": {
                 "streetview_standard": {
                     "subtotal": round(streetview_standard_total, 2),
-                    "price": round(streetview_standard_total * 1.5, 2),
+                    "price": round(streetview_standard_total, 2),
                     "description": "1 optimized angle"
                 },
                 "streetview_premium": {
                     "subtotal": round(streetview_premium_total, 2),
-                    "price": round(streetview_premium_total * 1.5, 2),
+                    "price": round(streetview_premium_total, 2),
                     "description": "4 angles (N, E, S, W)"
                 },
                 "full_scoring_standard": {
                     "subtotal": round(full_scoring_standard_total, 2),
-                    "price": round(full_scoring_standard_total * 1.5, 2),
+                    "price": round(full_scoring_standard_total, 2),
                     "description": "AI scoring (1 angle scored with Gemini 2.0 Flash)"
                 },
                 "full_scoring_premium": {
                     "subtotal": round(full_scoring_premium_total, 2),
-                    "price": round(full_scoring_premium_total * 1.5, 2),
+                    "price": round(full_scoring_premium_total, 2),
                     "description": "AI scoring (4 angles scored with Gemini 2.0 Flash)"
                 }
             }
@@ -253,8 +253,8 @@ def create_checkout_session():
         else:
             return jsonify({"error": "Invalid service level"}), 400
 
-        # Apply 50% markup
-        final_price = total * 1.5
+        # At-cost pricing (no markup)
+        final_price = total
 
         # Convert to cents for Stripe (minimum $0.50)
         amount_cents = max(int(final_price * 100), 50)

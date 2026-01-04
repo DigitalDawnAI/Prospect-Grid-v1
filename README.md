@@ -58,22 +58,22 @@ Response:
   "costs": {
     "streetview_standard": {
       "subtotal": 2.84,
-      "price": 4.26,
+      "price": 2.84,
       "description": "1 optimized angle"
     },
     "streetview_premium": {
-      "subtotal": 9.95,
-      "price": 14.93,
+      "subtotal": 7.82,
+      "price": 7.82,
       "description": "4 angles (N, E, S, W)"
     },
     "full_scoring_standard": {
-      "subtotal": 8.77,
-      "price": 13.16,
+      "subtotal": 2.86,
+      "price": 2.86,
       "description": "AI scoring + 1 angle"
     },
     "full_scoring_premium": {
-      "subtotal": 15.88,
-      "price": 23.82,
+      "subtotal": 7.89,
+      "price": 7.89,
       "description": "AI scoring + 4 angles"
     }
   }
@@ -82,12 +82,14 @@ Response:
 
 ## Service Tiers
 
+**At-cost pricing** - You pay exactly what the APIs cost, with zero markup.
+
 | Tier | Features | Cost/Property | Best For |
 |------|----------|---------------|----------|
-| **Street View Standard** | 1 optimized angle (135° SE) | ~$0.018 | Large batches, cost-sensitive |
-| **Street View Premium** | 4 angles (N, E, S, W) | ~$0.042 | High-value leads |
-| **Full Scoring Standard** ⭐ | AI scoring + 1 angle | ~$0.056 | Most common use case |
-| **Full Scoring Premium** | AI scoring + 4 angles | ~$0.079 | Premium leads |
+| **Street View Standard** | 1 optimized angle (135° SE) | $0.012 | Large batches, cost-sensitive |
+| **Street View Premium** | 4 angles (N, E, S, W) | $0.033 | High-value leads |
+| **Full Scoring Standard** ⭐ | AI scoring + 1 angle | $0.012 | Most common use case |
+| **Full Scoring Premium** | AI scoring + 4 angles | $0.033 | Premium leads |
 
 ### 3. Start Processing
 ```bash
