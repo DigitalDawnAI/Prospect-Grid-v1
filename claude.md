@@ -89,8 +89,41 @@ git push origin main
 - ✅ Auto-deploying to Railway: https://web-production-a42df.up.railway.app
 - ⏳ Frontend update needed to display new scoring fields
 
+### Known Issue: Session Expiration on Deployment
+
+**Problem**: "Session not found or expired" error after deployment
+- **Root cause**: In-memory storage (`upload_sessions = {}`) gets wiped on every Railway deployment
+- **Impact**: Any CSV uploads from before deployment become invalid
+- **Current workaround**: Re-upload CSV after each deployment
+
+**Why This Happens**:
+```python
+# app.py lines 29-33
+# In-memory storage for MVP (replace with PostgreSQL later)
+upload_sessions = {}  # ← Cleared on app restart
+campaigns = {}        # ← Cleared on app restart
+```
+
+When Railway deploys new code:
+1. App restarts
+2. Python dictionaries reset to empty `{}`
+3. All previous session IDs become invalid
+4. User gets "Session not found or expired" error
+
+**Not Related To**:
+- ✅ Frontend/backend compatibility - Backend returns both old and new scoring formats
+- ✅ Gemini API changes - Scoring works correctly
+- ✅ Frontend updates - Display issues don't cause session errors
+
+**Solutions** (in priority order):
+1. **Persistent storage** - Add PostgreSQL/Redis (recommended for production)
+2. **File-based sessions** - Save sessions to disk (quick MVP fix)
+3. **Session recovery** - Allow re-submission with same data
+4. **Current workaround** - Re-upload CSV after deployments (acceptable for testing)
+
 ### Next Steps
-- [ ] Update frontend to display 0-100 score (currently expects 1-10)
+- [ ] **URGENT**: Implement persistent storage (PostgreSQL or file-based) to fix session expiration
+- [ ] Update frontend to display 0-100 score (currently shows legacy 1-10)
 - [ ] Show recommendation level (strong/moderate/weak/not_a_candidate)
 - [ ] Display primary indicators list
 - [ ] Test with real distressed properties (should score 40-100)
