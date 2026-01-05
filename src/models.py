@@ -110,8 +110,16 @@ class StreetViewImage(BaseModel):
         return v
 
 
+class RecommendationLevel(str, Enum):
+    """Property acquisition recommendation level."""
+    STRONG_CANDIDATE = "strong_candidate"
+    MODERATE_CANDIDATE = "moderate_candidate"
+    WEAK_CANDIDATE = "weak_candidate"
+    NOT_A_CANDIDATE = "not_a_candidate"
+
+
 class ComponentScores(BaseModel):
-    """Individual component scores for property condition."""
+    """Individual component scores for property condition (legacy - kept for backward compatibility)."""
     roof: int = Field(ge=1, le=10)
     siding: int = Field(ge=1, le=10)
     landscaping: int = Field(ge=1, le=10)
@@ -119,14 +127,39 @@ class ComponentScores(BaseModel):
 
 
 class PropertyScore(BaseModel):
-    """VLM scoring results."""
-    overall_score: int = Field(ge=1, le=10)
-    reasoning: str = Field(max_length=2000)
-    component_scores: ComponentScores
-    confidence: ConfidenceLevel
+    """VLM scoring results - new format (0-100 scale for distressed property acquisition)."""
+    property_score: int = Field(ge=0, le=100, description="Distress score (0-100, higher = better candidate)")
+    confidence_level: ConfidenceLevel
+    primary_indicators_observed: list[str] = Field(default_factory=list, description="Key distress indicators")
+    recommendation: RecommendationLevel
+    brief_reasoning: str = Field(max_length=2000, description="Analysis of property condition")
+
+    # Legacy fields for backward compatibility (auto-converted from 0-100 scale)
+    overall_score: Optional[int] = Field(None, ge=1, le=10, description="Legacy 1-10 scale")
+    reasoning: Optional[str] = Field(None, max_length=2000)
+    component_scores: Optional[ComponentScores] = None
+
+    # Metadata
     image_quality_issues: Optional[str] = None
-    scoring_model: str = "claude-sonnet-4-20250514"
+    scoring_model: str = "gemini-2.5-flash"
     scored_at: datetime = Field(default_factory=datetime.now)
+
+    def __init__(self, **data):
+        """Initialize and auto-populate legacy fields for backward compatibility."""
+        super().__init__(**data)
+
+        # Auto-convert property_score (0-100) to overall_score (1-10) for legacy support
+        if self.property_score is not None and self.overall_score is None:
+            self.overall_score = min(10, max(1, round(self.property_score / 10)))
+
+        # Copy brief_reasoning to reasoning
+        if self.brief_reasoning and not self.reasoning:
+            self.reasoning = self.brief_reasoning
+
+    @property
+    def confidence(self) -> ConfidenceLevel:
+        """Alias for backward compatibility."""
+        return self.confidence_level
 
 
 class ScoredProperty(BaseModel):
@@ -141,15 +174,21 @@ class ScoredProperty(BaseModel):
     latitude: float
     longitude: float
 
-    # Scoring (single angle - for backward compatibility and standard tier)
-    prospect_score: Optional[int] = Field(None, ge=1, le=10)
+    # Scoring (single angle - new format)
+    property_score: Optional[int] = Field(None, ge=0, le=100, description="Distress score (0-100)")
+    recommendation: Optional[RecommendationLevel] = None
+    primary_indicators: Optional[list[str]] = None
     score_reasoning: Optional[str] = None
+    confidence_level: Optional[ConfidenceLevel] = None
+
+    # Legacy scoring fields (1-10 scale - kept for backward compatibility)
+    prospect_score: Optional[int] = Field(None, ge=1, le=10)
     score_roof: Optional[int] = Field(None, ge=1, le=10)
     score_siding: Optional[int] = Field(None, ge=1, le=10)
     score_landscaping: Optional[int] = Field(None, ge=1, le=10)
     score_vacancy: Optional[int] = Field(None, ge=1, le=10)
     scoring_model: Optional[str] = None
-    confidence: Optional[ConfidenceLevel] = None
+    confidence: Optional[ConfidenceLevel] = None  # Alias for confidence_level
 
     # Multi-angle scoring (premium tier - stores all 4 angle scores)
     scores_by_angle: Optional[list[PropertyScore]] = None  # N, E, S, W angle scores
@@ -199,14 +238,25 @@ class ScoredProperty(BaseModel):
 
     def add_score(self, score: PropertyScore) -> None:
         """Add scoring data to property (single angle)."""
-        self.prospect_score = score.overall_score
-        self.score_reasoning = score.reasoning
-        self.score_roof = score.component_scores.roof
-        self.score_siding = score.component_scores.siding
-        self.score_landscaping = score.component_scores.landscaping
-        self.score_vacancy = score.component_scores.vacancy_signals
+        # New format fields
+        self.property_score = score.property_score
+        self.recommendation = score.recommendation
+        self.primary_indicators = score.primary_indicators_observed
+        self.score_reasoning = score.brief_reasoning
+        self.confidence_level = score.confidence_level
         self.scoring_model = score.scoring_model
-        self.confidence = score.confidence
+
+        # Legacy fields for backward compatibility
+        self.prospect_score = score.overall_score
+        self.confidence = score.confidence_level
+
+        # Legacy component scores (if available)
+        if score.component_scores:
+            self.score_roof = score.component_scores.roof
+            self.score_siding = score.component_scores.siding
+            self.score_landscaping = score.component_scores.landscaping
+            self.score_vacancy = score.component_scores.vacancy_signals
+
         self.processing_status = ProcessingStatus.COMPLETE
         self.processed_date = datetime.now()
         self.updated_at = datetime.now()
@@ -219,14 +269,24 @@ class ScoredProperty(BaseModel):
         valid_scores = [s for s in scores if s is not None]
         if valid_scores:
             first_score = valid_scores[0]
-            self.prospect_score = first_score.overall_score
-            self.score_reasoning = first_score.reasoning
-            self.score_roof = first_score.component_scores.roof
-            self.score_siding = first_score.component_scores.siding
-            self.score_landscaping = first_score.component_scores.landscaping
-            self.score_vacancy = first_score.component_scores.vacancy_signals
+
+            # New format fields
+            self.property_score = first_score.property_score
+            self.recommendation = first_score.recommendation
+            self.primary_indicators = first_score.primary_indicators_observed
+            self.score_reasoning = first_score.brief_reasoning
+            self.confidence_level = first_score.confidence_level
             self.scoring_model = first_score.scoring_model
-            self.confidence = first_score.confidence
+
+            # Legacy fields
+            self.prospect_score = first_score.overall_score
+            self.confidence = first_score.confidence_level
+
+            if first_score.component_scores:
+                self.score_roof = first_score.component_scores.roof
+                self.score_siding = first_score.component_scores.siding
+                self.score_landscaping = first_score.component_scores.landscaping
+                self.score_vacancy = first_score.component_scores.vacancy_signals
 
         self.processing_status = ProcessingStatus.COMPLETE
         self.processed_date = datetime.now()

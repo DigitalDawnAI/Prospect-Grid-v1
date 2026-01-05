@@ -1,0 +1,83 @@
+You are analyzing a Google Street View image of a residential property to assess its potential for distressed property acquisition.
+
+TASK: Evaluate this property and assess the probability that it is a good candidate for acquisition based on visual indicators of distress.
+
+SCORING SYSTEM:
+- Scale: 0-100
+- Higher scores indicate stronger candidates for acquisition
+- Score represents cumulative evidence of property distress and owner motivation to sell
+
+EVALUATION CRITERIA:
+
+1. STRUCTURAL AND EXTERIOR DECAY (HIGH WEIGHT):
+   Look for:
+   - Boarded windows or doors
+   - Missing, damaged, or sagging roof shingles
+   - Sagging roofline
+   - Broken or missing gutters and downspouts
+   - Cracked or crumbling visible foundation
+   - Peeling or missing siding or stucco
+   - Broken windows
+   - Severely faded or damaged paint
+
+2. LANDSCAPE AND GROUNDS (MEDIUM WEIGHT):
+   Look for:
+   - Dead trees or large branches on property
+   - Debris, junk, or abandoned items in yard
+   - Abandoned appliances or materials visible
+   - Broken or significantly leaning fence sections
+   - Driveway with significant cracks, potholes, or missing asphalt
+   - Weeds growing through walkway or driveway cracks
+   - Overgrown grass and shrubbery
+
+3. ABANDONMENT AND VACANCY SIGNALS (HIGH WEIGHT):
+   Look for:
+   - No visible vehicles in driveway
+   - Accumulated newspapers or packages
+   - Faded or sun-damaged items visible through windows
+   - Visible mold or water stains on exterior
+   - No electric service (dark/no lighting visible)
+   - Excessive mail accumulation in mailbox
+   - Posted foreclosure or abandonment notices
+
+4. UTILITY AND MAINTENANCE (MEDIUM WEIGHT):
+   Look for:
+   - No visible HVAC units or non-functional units
+   - Disconnected or hanging electrical/utility lines
+   - Overgrown AC condenser unit suggesting non-use
+   - Visible mold or water damage on exterior
+
+5. NEIGHBORHOOD CONTEXT (LOW-TO-MEDIUM WEIGHT):
+   Look for:
+   - Adjacent properties also showing neglect
+   - Multiple properties on same block with similar distress
+   - Signs of neighborhood decline
+
+SCORING GUIDELINES:
+- Multiple indicators significantly increase the score
+- High-weight indicators (structural decay, vacancy signals) are more important
+- Single indicators warrant lower scores
+- Be conservative: if uncertainty exists, note it but do not assume distress
+- Boarded windows + no vehicles + excessive mail is stronger than overgrown landscaping alone
+
+RECOMMENDATION LEVELS:
+- "strong_candidate" (70-100): Multiple high-weight indicators, likely motivated seller
+- "moderate_candidate" (40-69): Some distress indicators present
+- "weak_candidate" (15-39): Few indicators, uncertain opportunity
+- "not_a_candidate" (0-14): No significant distress visible
+
+Return ONLY valid JSON in this exact format:
+{
+  "property_score": 75,
+  "confidence_level": "high",
+  "primary_indicators_observed": [
+    "Boarded windows",
+    "No visible vehicles",
+    "Overgrown landscaping",
+    "Missing roof shingles"
+  ],
+  "recommendation": "strong_candidate",
+  "brief_reasoning": "Property shows multiple high-weight indicators including boarded windows and no vehicles suggesting vacancy. Structural decay visible in roof damage. Strong acquisition candidate for wholesale or renovation."
+}
+
+Return ONLY the JSON object. No other text.

@@ -9,7 +9,7 @@ from pathlib import Path
 import google.generativeai as genai
 from dotenv import load_dotenv
 
-from .models import PropertyScore, ComponentScores, ConfidenceLevel, StreetViewImage
+from .models import PropertyScore, StreetViewImage
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -18,13 +18,13 @@ logger = logging.getLogger(__name__)
 class GeminiPropertyScorer:
     """Handles property condition scoring using Gemini 2.0 Flash vision model."""
 
-    def __init__(self, api_key: Optional[str] = None, model: str = "gemini-1.5-flash", rate_limit_delay: float = 4.0):
+    def __init__(self, api_key: Optional[str] = None, model: str = "gemini-2.5-flash", rate_limit_delay: float = 4.0):
         """
         Initialize scorer with Google API key.
 
         Args:
             api_key: Google API key (or from environment)
-            model: Gemini model to use (default: gemini-1.5-flash)
+            model: Gemini model to use (default: gemini-2.5-flash)
             rate_limit_delay: Delay in seconds between API calls to avoid quota (default: 4.0 for 15 req/min)
         """
         self.api_key = api_key or os.getenv("GOOGLE_API_KEY") or os.getenv("GOOGLE_MAPS_API_KEY")
@@ -193,25 +193,25 @@ Score 10 = severe distress, 1 = excellent condition"""
         Create PropertyScore model from parsed response.
 
         Args:
-            score_data: Parsed JSON response
+            score_data: Parsed JSON response (new format with 0-100 scale)
 
         Returns:
             PropertyScore instance
         """
-        component_scores = ComponentScores(
-            roof=score_data["component_scores"]["roof"],
-            siding=score_data["component_scores"]["siding"],
-            landscaping=score_data["component_scores"]["landscaping"],
-            vacancy_signals=score_data["component_scores"]["vacancy_signals"]
-        )
+        from .models import ConfidenceLevel, RecommendationLevel
 
-        confidence = ConfidenceLevel(score_data["confidence"].lower())
+        # Parse confidence level
+        confidence = ConfidenceLevel(score_data["confidence_level"].lower())
+
+        # Parse recommendation level
+        recommendation = RecommendationLevel(score_data["recommendation"].lower())
 
         return PropertyScore(
-            overall_score=score_data["overall_score"],
-            reasoning=score_data["reasoning"],
-            component_scores=component_scores,
-            confidence=confidence,
+            property_score=score_data["property_score"],
+            confidence_level=confidence,
+            primary_indicators_observed=score_data.get("primary_indicators_observed", []),
+            recommendation=recommendation,
+            brief_reasoning=score_data["brief_reasoning"],
             image_quality_issues=score_data.get("image_quality_issues"),
             scoring_model=self.model._model_name
         )
