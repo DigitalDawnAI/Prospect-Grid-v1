@@ -5,7 +5,96 @@
 ProspectGrid is a Flask-based REST API that processes real estate addresses through:
 1. **Geocoding** (Google Maps API) - Convert addresses to coordinates
 2. **Street View Fetching** (Google Street View API) - Get property images
-3. **AI Scoring** (Anthropic Claude) - Score properties for investment potential
+3. **AI Scoring** (Google Gemini 2.5 Flash) - Score properties for distressed property acquisition (0-100 scale)
+
+---
+
+## Session: January 4, 2026 - Fix Gemini Vision API & Implement Scoring Rubric
+
+### Issue Discovered
+**Problem**: Images were being fetched but no scoring was happening
+- User reported: "im taking the images but no scoring now"
+- Root cause: `gemini-1.5-flash` model doesn't exist (404 error)
+- Secondary issue: No comprehensive scoring rubric file (using basic fallback)
+
+### Investigation
+Created diagnostic test script (`test_gemini.py`) to debug Gemini API:
+```bash
+python3 test_gemini.py
+```
+
+**Findings**:
+- ❌ Error: `404 models/gemini-1.5-flash is not found`
+- ✅ Available models: `gemini-2.5-flash`, `gemini-2.0-flash`, `gemini-flash-latest`
+- ⚠️ No `prompts/scoring_v1.txt` file (scorer was using basic fallback)
+
+### The Fix
+
+✅ **Updated Model Name**
+- Changed from `gemini-1.5-flash` → `gemini-2.5-flash`
+- File: `src/gemini_scorer.py:21`
+
+✅ **Implemented Comprehensive Scoring Rubric**
+- Created `prompts/scoring_v1.txt` with detailed distressed property acquisition criteria
+- **Scale**: 0-100 (higher = better acquisition candidate)
+- **Weighted Criteria**:
+  - Structural & Exterior Decay (HIGH WEIGHT)
+  - Abandonment & Vacancy Signals (HIGH WEIGHT)
+  - Landscape & Grounds (MEDIUM WEIGHT)
+  - Utility & Maintenance (MEDIUM WEIGHT)
+  - Neighborhood Context (LOW-MEDIUM WEIGHT)
+
+✅ **Updated Data Models** (`src/models.py`)
+New `PropertyScore` format:
+- `property_score` (0-100) - Main distress score
+- `recommendation` - strong_candidate, moderate_candidate, weak_candidate, not_a_candidate
+- `primary_indicators_observed` - List of distress signals
+- `brief_reasoning` - Detailed property analysis
+- `confidence_level` - high, medium, low
+- **Auto-converts** 0-100 scale to legacy 1-10 scale for backward compatibility
+
+✅ **Updated Scorer Logic** (`src/gemini_scorer.py`)
+- Parse new JSON response format
+- Handle recommendation levels
+- Maintain backward compatibility
+
+### Recommendation Levels
+- **strong_candidate** (70-100): Multiple high-weight indicators, motivated seller likely
+- **moderate_candidate** (40-69): Some distress indicators present
+- **weak_candidate** (15-39): Few indicators, uncertain opportunity
+- **not_a_candidate** (0-14): No significant distress visible
+
+### Testing Results
+```bash
+Property Score: 5/100
+Recommendation: not_a_candidate
+Confidence: high
+Primary Indicators: (none - well-maintained property)
+Reasoning: Well-maintained commercial/residential buildings and active urban environment
+Legacy conversion: 1/10 ✅
+```
+
+### Files Changed
+- `prompts/scoring_v1.txt` - **NEW** - Comprehensive scoring rubric
+- `src/gemini_scorer.py` - Model name + response parsing
+- `src/models.py` - New PropertyScore format with backward compatibility
+- `test_gemini.py` - **NEW** - Diagnostic test script
+
+### Deployment
+```bash
+git commit -m "Fix Gemini vision API and implement proper scoring rubric"
+git push origin main
+```
+- ✅ Pushed to GitHub: commit `03b746f`
+- ✅ Auto-deploying to Railway: https://web-production-a42df.up.railway.app
+- ⏳ Frontend update needed to display new scoring fields
+
+### Next Steps
+- [ ] Update frontend to display 0-100 score (currently expects 1-10)
+- [ ] Show recommendation level (strong/moderate/weak/not_a_candidate)
+- [ ] Display primary indicators list
+- [ ] Test with real distressed properties (should score 40-100)
+- [ ] Test multi-angle scoring with premium tier
 
 ---
 
