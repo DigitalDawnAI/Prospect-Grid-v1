@@ -121,13 +121,60 @@ When Railway deploys new code:
 3. **Session recovery** - Allow re-submission with same data
 4. **Current workaround** - Re-upload CSV after deployments (acceptable for testing)
 
-### Next Steps
-- [ ] **URGENT**: Implement persistent storage (PostgreSQL or file-based) to fix session expiration
+### Next Steps - Choose Your Path
+
+**Option A: Test Scoring Now (Quick - 5 minutes)**
+- Re-upload CSV to create fresh session
+- Test new Gemini 2.5 Flash scoring
+- Verify 0-100 distress scores work correctly
+- See recommendation levels in action
+- Good for: Immediate testing, validating the fix works
+
+**Option B: Fix Session Storage (Medium - 30 minutes)**
+- Implement file-based session storage
+- Save sessions to `/tmp/sessions/` on Railway
+- Auto-recover sessions on app restart
+- No more "session not found" errors after deployments
+- Good for: Quick MVP fix, testing without re-uploads
+- Implementation:
+  ```python
+  import json
+  from pathlib import Path
+
+  SESSION_DIR = Path("/tmp/sessions")
+
+  def save_session(session_id, data):
+      SESSION_DIR.mkdir(exist_ok=True)
+      with open(SESSION_DIR / f"{session_id}.json", "w") as f:
+          json.dump(data, f)
+
+  def load_session(session_id):
+      try:
+          with open(SESSION_DIR / f"{session_id}.json", "r") as f:
+              return json.load(f)
+      except FileNotFoundError:
+          return None
+  ```
+
+**Option C: Full Database Solution (Longer - 2-3 hours)**
+- Add PostgreSQL via Railway
+- Proper relational database schema
+- Store sessions, campaigns, and results persistently
+- Production-ready architecture
+- Good for: Long-term solution, scalability
+- Steps:
+  1. Add PostgreSQL plugin in Railway
+  2. Install `psycopg2-binary` and `sqlalchemy`
+  3. Create database models for sessions/campaigns
+  4. Migrate from in-memory to database queries
+  5. Add proper indexing and constraints
+
+**Other Tasks (After choosing A, B, or C):**
 - [ ] Update frontend to display 0-100 score (currently shows legacy 1-10)
 - [ ] Show recommendation level (strong/moderate/weak/not_a_candidate)
-- [ ] Display primary indicators list
+- [ ] Display primary indicators list in results modal
 - [ ] Test with real distressed properties (should score 40-100)
-- [ ] Test multi-angle scoring with premium tier
+- [ ] Test multi-angle scoring with premium tier (4 separate scores)
 
 ---
 
