@@ -13,6 +13,7 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Any
 import os
 import stripe
+import threading
 
 from src.models import RawAddress, ScoredProperty, ProcessingStatus
 from src.geocoder import Geocoder
@@ -350,8 +351,10 @@ def verify_payment(stripe_session_id: str):
             "properties": []
         }
 
-        # Start processing in background (for now, synchronous)
-        process_campaign(campaign_id)
+        # Start processing in background thread
+        thread = threading.Thread(target=process_campaign, args=(campaign_id,), daemon=True)
+        thread.start()
+        logger.info(f"Started background processing for campaign {campaign_id}")
 
         return jsonify({
             "campaign_id": campaign_id,
@@ -420,10 +423,11 @@ def start_processing(session_id: str):
             "properties": []
         }
         
-        # TODO: Queue background job for actual processing
-        # For now, we'll do synchronous processing (MVP)
-        process_campaign(campaign_id)
-        
+        # Start processing in background thread
+        thread = threading.Thread(target=process_campaign, args=(campaign_id,), daemon=True)
+        thread.start()
+        logger.info(f"Started background processing for campaign {campaign_id}")
+
         return jsonify({
             "campaign_id": campaign_id,
             "status": "processing",
@@ -437,71 +441,83 @@ def start_processing(session_id: str):
 
 def process_campaign(campaign_id: str):
     """
-    Process all addresses in a campaign
-    This should be moved to a background worker (Celery/RQ)
+    Process all addresses in a campaign in background thread
+    Handles geocoding, Street View fetching, and AI scoring
     """
-    campaign = campaigns[campaign_id]
-    session = upload_sessions[campaign['session_id']]
-    service_level = campaign['service_level']
-    street_view_mode = campaign.get('street_view_mode', 'standard')
+    try:
+        logger.info(f"Starting campaign processing: {campaign_id}")
+        campaign = campaigns[campaign_id]
+        session = upload_sessions[campaign['session_id']]
+        service_level = campaign['service_level']
+        street_view_mode = campaign.get('street_view_mode', 'standard')
 
-    # Determine if we need multi-angle images
-    multi_angle = (street_view_mode == 'premium')
+        # Determine if we need multi-angle images
+        multi_angle = (street_view_mode == 'premium')
 
-    # Determine if we need AI scoring
-    needs_scoring = 'full_scoring' in service_level
+        # Determine if we need AI scoring
+        needs_scoring = 'full_scoring' in service_level
 
-    for raw_addr_dict in session['addresses']:
-        try:
-            # Convert dict back to RawAddress
-            raw_addr = RawAddress(**raw_addr_dict)
+        for raw_addr_dict in session['addresses']:
+            try:
+                # Convert dict back to RawAddress
+                raw_addr = RawAddress(**raw_addr_dict)
 
-            # Step 1: Geocode
-            geocoded = geocoder.geocode(raw_addr)
-            if not geocoded:
-                campaign['failed_count'] += 1
-                campaign['properties'].append({
-                    "input_address": raw_addr.full_address,
-                    "status": "failed",
-                    "error_message": "Geocoding failed"
-                })
-                continue
+                # Step 1: Geocode
+                geocoded = geocoder.geocode(raw_addr)
+                if not geocoded:
+                    campaign['failed_count'] += 1
+                    campaign['properties'].append({
+                        "input_address": raw_addr.full_address,
+                        "status": "failed",
+                        "error_message": "Geocoding failed"
+                    })
+                    campaign['processed_count'] += 1
+                    continue
 
-            # Create ScoredProperty
-            prop = ScoredProperty.from_geocoded(geocoded, campaign_id)
+                # Create ScoredProperty
+                prop = ScoredProperty.from_geocoded(geocoded, campaign_id)
 
-            # Step 2: Get Street View
-            street_view = streetview_fetcher.fetch(geocoded, multi_angle=multi_angle)
-            if street_view:
-                prop.add_street_view(street_view)
-            else:
-                prop.processing_status = ProcessingStatus.NO_IMAGERY
-
-            # Step 3: Score with Gemini 2.0 Flash (all tiers now use Gemini)
-            if needs_scoring and street_view and street_view.image_available:
-                # For premium tier with multi-angle, score all 4 angles
-                if multi_angle and street_view.image_urls_multi_angle:
-                    scores = property_scorer.score_multiple(street_view, street_view.image_urls_multi_angle)
-                    if scores and any(s is not None for s in scores):
-                        prop.add_scores_multi_angle(scores)
+                # Step 2: Get Street View
+                street_view = streetview_fetcher.fetch(geocoded, multi_angle=multi_angle)
+                if street_view:
+                    prop.add_street_view(street_view)
                 else:
-                    # For standard tier, score single image
-                    score = property_scorer.score(street_view)
-                    if score:
-                        prop.add_score(score)
-            
-            campaign['properties'].append(prop.model_dump())
-            campaign['processed_count'] += 1
-            if prop.processing_status == ProcessingStatus.COMPLETE:
-                campaign['success_count'] += 1
-            
-        except Exception as e:
-            logger.error(f"Error processing address: {e}")
-            campaign['failed_count'] += 1
-    
-    # Mark campaign as complete
-    campaign['status'] = 'completed'
-    campaign['completed_at'] = datetime.now().isoformat()
+                    prop.processing_status = ProcessingStatus.NO_IMAGERY
+
+                # Step 3: Score with Gemini 2.0 Flash (all tiers now use Gemini)
+                if needs_scoring and street_view and street_view.image_available:
+                    # For premium tier with multi-angle, score all 4 angles
+                    if multi_angle and street_view.image_urls_multi_angle:
+                        scores = property_scorer.score_multiple(street_view, street_view.image_urls_multi_angle)
+                        if scores and any(s is not None for s in scores):
+                            prop.add_scores_multi_angle(scores)
+                    else:
+                        # For standard tier, score single image
+                        score = property_scorer.score(street_view)
+                        if score:
+                            prop.add_score(score)
+
+                campaign['properties'].append(prop.model_dump())
+                campaign['processed_count'] += 1
+                if prop.processing_status == ProcessingStatus.COMPLETE:
+                    campaign['success_count'] += 1
+
+            except Exception as e:
+                logger.error(f"Error processing address {raw_addr.full_address}: {e}", exc_info=True)
+                campaign['failed_count'] += 1
+                campaign['processed_count'] += 1
+
+        # Mark campaign as complete
+        campaign['status'] = 'completed'
+        campaign['completed_at'] = datetime.now().isoformat()
+        logger.info(f"Campaign {campaign_id} completed: {campaign['success_count']}/{campaign['total_properties']} successful")
+
+    except Exception as e:
+        logger.error(f"Fatal error in campaign {campaign_id}: {e}", exc_info=True)
+        # Mark campaign as failed
+        if campaign_id in campaigns:
+            campaigns[campaign_id]['status'] = 'failed'
+            campaigns[campaign_id]['error'] = str(e)
 
 
 @app.route('/api/status/<campaign_id>', methods=['GET'])
