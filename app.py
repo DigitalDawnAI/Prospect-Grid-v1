@@ -18,6 +18,7 @@ from src.models import RawAddress, ScoredProperty, ProcessingStatus
 from src.geocoder import Geocoder
 from src.streetview import StreetViewFetcher
 from src.gemini_scorer import GeminiPropertyScorer
+from src.storage_helper import save_session, load_session, save_campaign, load_campaign, cleanup_expired_sessions
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -26,11 +27,10 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 CORS(app)  # Allow frontend to call API
 
-# In-memory storage for MVP (replace with PostgreSQL later)
-# Structure: {session_id: {addresses: [...], campaign_id: str, email: str}}
-upload_sessions = {}
-# Structure: {campaign_id: {properties: [...], status: str, ...}}
-campaigns = {}
+# File-based storage (persists across Railway deployments)
+# Sessions and campaigns are now stored in /tmp/prospectgrid_sessions/
+# Cleanup expired sessions on startup
+cleanup_expired_sessions()
 
 # Initialize processors
 geocoder = Geocoder()
@@ -102,14 +102,15 @@ def upload_csv():
         if len(addresses) > 500:
             return jsonify({"error": "Maximum 500 addresses per upload"}), 400
         
-        # Create session
+        # Create session and save to disk
         session_id = str(uuid.uuid4())
-        upload_sessions[session_id] = {
+        session_data = {
             "addresses": addresses,
             "created_at": datetime.now().isoformat(),
             "expires_at": (datetime.now() + timedelta(hours=24)).isoformat()
         }
-        
+        save_session(session_id, session_data)
+
         return jsonify({
             "session_id": session_id,
             "address_count": len(addresses),
@@ -133,10 +134,10 @@ def get_estimate(session_id: str):
         Cost breakdown for Street View only vs Full Scoring
     """
     try:
-        if session_id not in upload_sessions:
+        session = load_session(session_id)
+        if not session:
             return jsonify({"error": "Session not found or expired"}), 404
-        
-        session = upload_sessions[session_id]
+
         address_count = len(session['addresses'])
         
         # Cost calculation
@@ -226,10 +227,10 @@ def create_checkout_session():
         if not upload_session_id or not service_level:
             return jsonify({"error": "Missing required fields"}), 400
 
-        if upload_session_id not in upload_sessions:
+        session = load_session(upload_session_id)
+        if not session:
             return jsonify({"error": "Session not found or expired"}), 404
 
-        session = upload_sessions[upload_session_id]
         address_count = len(session['addresses'])
 
         # Calculate pricing (same logic as /api/estimate)
@@ -323,17 +324,16 @@ def verify_payment(stripe_session_id: str):
         upload_session_id = checkout_session.metadata['upload_session_id']
         service_level = checkout_session.metadata['service_level']
 
-        if upload_session_id not in upload_sessions:
+        session = load_session(upload_session_id)
+        if not session:
             return jsonify({"error": "Session not found or expired"}), 404
 
         # Determine street view mode from service level
         street_view_mode = "premium" if "premium" in service_level else "standard"
 
-        # Create campaign
+        # Create campaign and save to disk
         campaign_id = str(uuid.uuid4())
-        session = upload_sessions[upload_session_id]
-
-        campaigns[campaign_id] = {
+        campaign_data = {
             "campaign_id": campaign_id,
             "session_id": upload_session_id,
             "email": checkout_session.customer_email,
@@ -349,6 +349,7 @@ def verify_payment(stripe_session_id: str):
             "failed_count": 0,
             "properties": []
         }
+        save_campaign(campaign_id, campaign_data)
 
         # Start processing in background (for now, synchronous)
         process_campaign(campaign_id)
@@ -389,7 +390,8 @@ def start_processing(session_id: str):
                 "error": "Service temporarily unavailable for maintenance. Please check back soon."
             }), 503
 
-        if session_id not in upload_sessions:
+        session = load_session(session_id)
+        if not session:
             return jsonify({"error": "Session not found or expired"}), 404
 
         data = request.json
@@ -400,11 +402,9 @@ def start_processing(session_id: str):
         # Determine street view mode from service level
         street_view_mode = "premium" if "premium" in service_level else "standard"
 
-        # Create campaign
+        # Create campaign and save to disk
         campaign_id = str(uuid.uuid4())
-        session = upload_sessions[session_id]
-
-        campaigns[campaign_id] = {
+        campaign_data = {
             "campaign_id": campaign_id,
             "session_id": session_id,
             "email": email,
@@ -419,7 +419,8 @@ def start_processing(session_id: str):
             "failed_count": 0,
             "properties": []
         }
-        
+        save_campaign(campaign_id, campaign_data)
+
         # TODO: Queue background job for actual processing
         # For now, we'll do synchronous processing (MVP)
         process_campaign(campaign_id)
@@ -440,8 +441,16 @@ def process_campaign(campaign_id: str):
     Process all addresses in a campaign
     This should be moved to a background worker (Celery/RQ)
     """
-    campaign = campaigns[campaign_id]
-    session = upload_sessions[campaign['session_id']]
+    campaign = load_campaign(campaign_id)
+    if not campaign:
+        logger.error(f"Campaign {campaign_id} not found")
+        return
+
+    session = load_session(campaign['session_id'])
+    if not session:
+        logger.error(f"Session {campaign['session_id']} not found")
+        return
+
     service_level = campaign['service_level']
     street_view_mode = campaign.get('street_view_mode', 'standard')
 
@@ -494,24 +503,29 @@ def process_campaign(campaign_id: str):
             campaign['processed_count'] += 1
             if prop.processing_status == ProcessingStatus.COMPLETE:
                 campaign['success_count'] += 1
-            
+
+            # Save campaign after each property (allows resume on crash)
+            save_campaign(campaign_id, campaign)
+
         except Exception as e:
             logger.error(f"Error processing address: {e}")
             campaign['failed_count'] += 1
-    
-    # Mark campaign as complete
+            # Save campaign after each property (allows resume on crash)
+            save_campaign(campaign_id, campaign)
+
+    # Mark campaign as complete and save
     campaign['status'] = 'completed'
     campaign['completed_at'] = datetime.now().isoformat()
+    save_campaign(campaign_id, campaign)
 
 
 @app.route('/api/status/<campaign_id>', methods=['GET'])
 def get_status(campaign_id: str):
     """Get processing status for a campaign"""
     try:
-        if campaign_id not in campaigns:
+        campaign = load_campaign(campaign_id)
+        if not campaign:
             return jsonify({"error": "Campaign not found"}), 404
-        
-        campaign = campaigns[campaign_id]
         
         return jsonify({
             "campaign_id": campaign_id,
@@ -532,10 +546,9 @@ def get_status(campaign_id: str):
 def get_results(campaign_id: str):
     """Get all scored properties for a campaign"""
     try:
-        if campaign_id not in campaigns:
+        campaign = load_campaign(campaign_id)
+        if not campaign:
             return jsonify({"error": "Campaign not found"}), 404
-        
-        campaign = campaigns[campaign_id]
         
         return jsonify({
             "campaign_id": campaign_id,
@@ -555,10 +568,9 @@ def get_results(campaign_id: str):
 def get_property(campaign_id: str, property_index: int):
     """Get single property details"""
     try:
-        if campaign_id not in campaigns:
+        campaign = load_campaign(campaign_id)
+        if not campaign:
             return jsonify({"error": "Campaign not found"}), 404
-        
-        campaign = campaigns[campaign_id]
         
         if property_index >= len(campaign['properties']):
             return jsonify({"error": "Property not found"}), 404
