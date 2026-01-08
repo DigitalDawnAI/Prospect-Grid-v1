@@ -13,6 +13,7 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Any
 import os
 import stripe
+import threading
 
 from src.models import RawAddress, ScoredProperty, ProcessingStatus
 from src.geocoder import Geocoder
@@ -354,8 +355,10 @@ def verify_payment(stripe_session_id: str):
         }
         save_campaign(campaign_id, campaign_data)
 
-        # Start processing in background (for now, synchronous)
-        process_campaign(campaign_id)
+        # Start processing in background thread (non-blocking)
+        thread = threading.Thread(target=process_campaign, args=(campaign_id,), daemon=True)
+        thread.start()
+        logger.info(f"Started background processing thread for campaign {campaign_id}")
 
         return jsonify({
             "campaign_id": campaign_id,
@@ -424,10 +427,11 @@ def start_processing(session_id: str):
         }
         save_campaign(campaign_id, campaign_data)
 
-        # TODO: Queue background job for actual processing
-        # For now, we'll do synchronous processing (MVP)
-        process_campaign(campaign_id)
-        
+        # Start processing in background thread (non-blocking)
+        thread = threading.Thread(target=process_campaign, args=(campaign_id,), daemon=True)
+        thread.start()
+        logger.info(f"Started background processing thread for campaign {campaign_id}")
+
         return jsonify({
             "campaign_id": campaign_id,
             "status": "processing",
