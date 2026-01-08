@@ -10,8 +10,9 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# Use /tmp on Railway (persists across deployments for reasonable time)
-# Use local storage for development
+# Use /tmp on Railway - it's ephemeral but works for short-term storage
+# For production, should use PostgreSQL or Redis
+# Single Railway instance means /tmp will work for same-request access
 STORAGE_DIR = Path(os.getenv('STORAGE_DIR', '/tmp/prospectgrid_sessions'))
 
 
@@ -120,8 +121,17 @@ def load_campaign(campaign_id: str) -> Optional[Dict[str, Any]]:
     """
     try:
         file_path = STORAGE_DIR / f"campaign_{campaign_id}.json"
+
+        # Debug: List all files in storage directory
+        if STORAGE_DIR.exists():
+            all_files = list(STORAGE_DIR.glob("*.json"))
+            logger.info(f"Storage dir has {len(all_files)} files: {[f.name for f in all_files[:5]]}")
+        else:
+            logger.warning(f"Storage directory {STORAGE_DIR} does not exist!")
+
         if not file_path.exists():
             logger.warning(f"Campaign {campaign_id} not found at {file_path}")
+            logger.warning(f"Looking for: campaign_{campaign_id}.json")
             return None
 
         with open(file_path, 'r') as f:
@@ -130,7 +140,7 @@ def load_campaign(campaign_id: str) -> Optional[Dict[str, Any]]:
         logger.info(f"Loaded campaign {campaign_id} from {file_path}")
         return data
     except Exception as e:
-        logger.error(f"Failed to load campaign {campaign_id}: {e}")
+        logger.error(f"Failed to load campaign {campaign_id}: {e}", exc_info=True)
         return None
 
 
