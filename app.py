@@ -73,25 +73,28 @@ def upload_csv():
         # Read CSV
         stream = io.StringIO(file.stream.read().decode("UTF8"), newline=None)
         csv_reader = csv.DictReader(stream)
-        
+
         # Parse addresses
         addresses = []
         errors = []
-        
+
         for idx, row in enumerate(csv_reader):
             try:
-                # Require 'street' column
-                if 'street' in row:
+                # Normalize column names to lowercase for case-insensitive matching
+                row_lower = {k.lower().strip(): v for k, v in row.items()}
+
+                # Require 'street' column (case-insensitive)
+                if 'street' in row_lower:
                     raw_address = RawAddress(
-                        address=row['street'],
-                        city=row.get('city'),
-                        state=row.get('state'),
-                        zip=row.get('zip')
+                        address=row_lower['street'],
+                        city=row_lower.get('city'),
+                        state=row_lower.get('state'),
+                        zip=row_lower.get('zip')
                     )
                 else:
                     errors.append(f"Row {idx + 1}: Missing 'street' column")
                     continue
-                
+
                 addresses.append(raw_address.model_dump())
             except Exception as e:
                 errors.append(f"Row {idx + 1}: {str(e)}")
