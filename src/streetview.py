@@ -8,9 +8,13 @@ from dotenv import load_dotenv
 
 from .models import GeocodedProperty, StreetViewImage
 from .geo_utils import calculate_bearing
+from .cache import get_cache, Cache
 
 load_dotenv()
 logger = logging.getLogger(__name__)
+
+# Sentinel value for "no coverage" cache entries
+NO_COVERAGE = "__NO_COVERAGE__"
 
 
 class PanoMetadata(NamedTuple):
@@ -29,10 +33,26 @@ class StreetViewFetcher:
     IMAGE_URL = "https://maps.googleapis.com/maps/api/streetview"
 
     def __init__(self, api_key: Optional[str] = None):
-        """Initialize Street View fetcher with API key."""
-        self.api_key = api_key or os.getenv("GOOGLE_MAPS_API_KEY")
-        if not self.api_key:
-            raise ValueError("Google Maps API key not found in environment")
+        """
+        Initialize Street View fetcher with optional API key.
+
+        API key validation is deferred until first use to prevent
+        import-time crashes when environment variables aren't set.
+        """
+        self._api_key = api_key
+        self._cache = get_cache()
+
+    @property
+    def api_key(self) -> str:
+        """Lazy-load API key from environment on first access."""
+        if self._api_key is None:
+            self._api_key = os.getenv("GOOGLE_MAPS_API_KEY")
+        if not self._api_key:
+            raise ValueError(
+                "Google Maps API key not configured. "
+                "Set GOOGLE_MAPS_API_KEY environment variable."
+            )
+        return self._api_key
 
     def fetch(
         self,
@@ -191,6 +211,10 @@ class StreetViewFetcher:
         """
         Check if Street View imagery is available for location.
 
+        Results are cached:
+        - Positive coverage: 30 days
+        - No coverage: 7 days (Street View updates quarterly)
+
         Returns:
             PanoMetadata with availability, date, pano_id, and camera location.
             Returns None if no imagery available.
@@ -199,6 +223,30 @@ class StreetViewFetcher:
             The returned pano_lat/pano_lng is the CAMERA position, not the property.
             This is crucial for calculating front-facing heading.
         """
+        # Parse location for cache key
+        try:
+            lat, lng = map(float, location.split(","))
+            cache_key = Cache.coverage_key(lat, lng)
+        except (ValueError, AttributeError):
+            cache_key = None
+
+        # Check cache first
+        if cache_key:
+            cached = self._cache.get(cache_key)
+            if cached == NO_COVERAGE:
+                logger.info(f"Coverage cache hit (no coverage): {location}")
+                return None
+            elif cached is not None:
+                logger.info(f"Coverage cache hit: {location}")
+                return PanoMetadata(
+                    available=True,
+                    image_date=cached.get("image_date"),
+                    pano_id=cached.get("pano_id"),
+                    pano_lat=cached.get("pano_lat"),
+                    pano_lng=cached.get("pano_lng")
+                )
+
+        # Cache miss - call API
         try:
             params = {
                 "location": location,
@@ -218,6 +266,19 @@ class StreetViewFetcher:
                 pano_lat = pano_location.get("lat")
                 pano_lng = pano_location.get("lng")
 
+                # Cache positive result
+                if cache_key:
+                    self._cache.set(
+                        cache_key,
+                        {
+                            "image_date": image_date,
+                            "pano_id": pano_id,
+                            "pano_lat": pano_lat,
+                            "pano_lng": pano_lng
+                        },
+                        ttl_seconds=Cache.TTL_COVERAGE
+                    )
+
                 return PanoMetadata(
                     available=True,
                     image_date=image_date,
@@ -227,6 +288,13 @@ class StreetViewFetcher:
                 )
             else:
                 logger.info(f"No Street View coverage at {location}: {data['status']}")
+                # Cache negative result with shorter TTL
+                if cache_key:
+                    self._cache.set(
+                        cache_key,
+                        NO_COVERAGE,
+                        ttl_seconds=Cache.TTL_NO_COVERAGE
+                    )
                 return None
 
         except Exception as e:
