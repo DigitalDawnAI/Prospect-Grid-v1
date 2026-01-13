@@ -7,6 +7,7 @@ import requests
 from dotenv import load_dotenv
 
 from .models import RawAddress, GeocodedProperty, GeocodeStatus
+from .cache import get_cache, Cache
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -18,14 +19,32 @@ class Geocoder:
     BASE_URL = "https://maps.googleapis.com/maps/api/geocode/json"
 
     def __init__(self, api_key: Optional[str] = None):
-        """Initialize geocoder with API key."""
-        self.api_key = api_key or os.getenv("GOOGLE_MAPS_API_KEY")
-        if not self.api_key:
-            raise ValueError("Google Maps API key not found in environment")
+        """
+        Initialize geocoder with optional API key.
+
+        API key validation is deferred until first use to prevent
+        import-time crashes when environment variables aren't set.
+        """
+        self._api_key = api_key
+        self._cache = get_cache()
+
+    @property
+    def api_key(self) -> str:
+        """Lazy-load API key from environment on first access."""
+        if self._api_key is None:
+            self._api_key = os.getenv("GOOGLE_MAPS_API_KEY")
+        if not self._api_key:
+            raise ValueError(
+                "Google Maps API key not configured. "
+                "Set GOOGLE_MAPS_API_KEY environment variable."
+            )
+        return self._api_key
 
     def geocode(self, address: RawAddress) -> Optional[GeocodedProperty]:
         """
         Geocode an address to coordinates and standardized format.
+
+        Results are cached for 30 days to reduce API costs.
 
         Args:
             address: Raw address to geocode
@@ -33,13 +52,36 @@ class Geocoder:
         Returns:
             GeocodedProperty if successful, None otherwise
         """
+        cache_key = Cache.geocode_key(address.full_address)
+
+        # Check cache first
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            logger.info(f"Geocode cache hit for: {address.full_address}")
+            return GeocodedProperty(**cached)
+
+        # Cache miss - call API
+        result = self._geocode_api(address)
+
+        # Cache successful results
+        if result is not None:
+            self._cache.set(
+                cache_key,
+                result.model_dump(),
+                ttl_seconds=Cache.TTL_GEOCODE
+            )
+
+        return result
+
+    def _geocode_api(self, address: RawAddress) -> Optional[GeocodedProperty]:
+        """Make actual API call to Google Maps Geocoding API."""
         try:
             params = {
                 "address": address.full_address,
                 "key": self.api_key
             }
 
-            logger.info(f"Geocoding: {address.full_address}")
+            logger.info(f"Geocoding (API call): {address.full_address}")
             response = requests.get(self.BASE_URL, params=params, timeout=10)
             response.raise_for_status()
 
