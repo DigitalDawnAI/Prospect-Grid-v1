@@ -18,10 +18,25 @@ class Geocoder:
     BASE_URL = "https://maps.googleapis.com/maps/api/geocode/json"
 
     def __init__(self, api_key: Optional[str] = None):
-        """Initialize geocoder with API key."""
-        self.api_key = api_key or os.getenv("GOOGLE_MAPS_API_KEY")
-        if not self.api_key:
-            raise ValueError("Google Maps API key not found in environment")
+        """
+        Initialize geocoder with optional API key.
+
+        API key validation is deferred until first use to prevent
+        import-time crashes when environment variables aren't set.
+        """
+        self._api_key = api_key
+
+    @property
+    def api_key(self) -> str:
+        """Lazy-load API key from environment on first access."""
+        if self._api_key is None:
+            self._api_key = os.getenv("GOOGLE_MAPS_API_KEY")
+        if not self._api_key:
+            raise ValueError(
+                "Google Maps API key not configured. "
+                "Set GOOGLE_MAPS_API_KEY environment variable."
+            )
+        return self._api_key
 
     def geocode(self, address: RawAddress) -> Optional[GeocodedProperty]:
         """

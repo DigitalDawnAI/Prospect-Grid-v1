@@ -35,6 +35,11 @@ class GeminiPropertyScorer:
         backoff_cap_s: float = 30.0,
     ):
         """
+        Initialize Gemini scorer with optional API key.
+
+        API key validation and model initialization are deferred until first use
+        to prevent import-time crashes when environment variables aren't set.
+
         Args:
             api_key: Gemini API key. Do NOT fall back to Google Maps key.
             model: Gemini model name.
@@ -43,21 +48,17 @@ class GeminiPropertyScorer:
             backoff_base_s: Base for exponential backoff.
             backoff_cap_s: Max sleep between retries.
         """
-        # IMPORTANT: do not fall back to GOOGLE_MAPS_API_KEY for Gemini calls
-        self.api_key = api_key or os.getenv("GEMINI_API_KEY")
-        if not self.api_key:
-            raise ValueError("Gemini API key not found (set GEMINI_API_KEY)")
-
-        genai.configure(api_key=self.api_key)
+        self._api_key = api_key
         self.model_name = model
-        self.model = genai.GenerativeModel(model)
+        self._model = None  # Lazy initialization
+        self._configured = False
 
         self.min_delay_s = float(min_delay_s)
         self.max_retries = int(max_retries)
         self.backoff_base_s = float(backoff_base_s)
         self.backoff_cap_s = float(backoff_cap_s)
 
-        # Load scoring prompt
+        # Load scoring prompt (this is safe at init time - just file I/O)
         prompt_path = Path(__file__).parent.parent / "prompts" / "scoring_v1.txt"
         if prompt_path.exists():
             with open(prompt_path, "r") as f:
@@ -75,6 +76,28 @@ class GeminiPropertyScorer:
 }
 Scoring: 100 = severe distress, 0 = excellent condition.
 """
+
+    @property
+    def api_key(self) -> str:
+        """Lazy-load API key from environment on first access."""
+        if self._api_key is None:
+            self._api_key = os.getenv("GEMINI_API_KEY")
+        if not self._api_key:
+            raise ValueError(
+                "Gemini API key not configured. "
+                "Set GEMINI_API_KEY environment variable."
+            )
+        return self._api_key
+
+    @property
+    def model(self):
+        """Lazy-initialize Gemini model on first access."""
+        if self._model is None:
+            if not self._configured:
+                genai.configure(api_key=self.api_key)
+                self._configured = True
+            self._model = genai.GenerativeModel(self.model_name)
+        return self._model
 
     def score(self, street_view: StreetViewImage) -> Optional[PropertyScore]:
         """Score a property based on Street View imagery."""
