@@ -1,11 +1,14 @@
-"""VLM property scoring module using Google Gemini 2.0 Flash."""
+"""VLM property scoring module using Google Gemini vision model."""
 
 import os
 import json
 import logging
 import time
+import random
+import threading
 from typing import Optional, List
 from pathlib import Path
+
 import google.generativeai as genai
 from dotenv import load_dotenv
 
@@ -16,25 +19,43 @@ logger = logging.getLogger(__name__)
 
 
 class GeminiPropertyScorer:
-    """Handles property condition scoring using Gemini 2.0 Flash vision model."""
+    """Handles property condition scoring using Gemini vision model."""
 
-    def __init__(self, api_key: Optional[str] = None, model: str = "gemini-2.5-flash", rate_limit_delay: float = 0.5):
+    # Global throttling across all instances/threads in this process
+    _lock = threading.Lock()
+    _last_call_ts = 0.0
+
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        model: str = "gemini-2.5-flash",
+        min_delay_s: float = 1.0,
+        max_retries: int = 6,
+        backoff_base_s: float = 1.0,
+        backoff_cap_s: float = 30.0,
+    ):
         """
-        Initialize scorer with Google API key.
-
         Args:
-            api_key: Google API key (or from environment)
-            model: Gemini model to use (default: gemini-2.5-flash)
-            rate_limit_delay: Delay in seconds between API calls to avoid quota (default: 0.5s)
-                            Gemini free tier: 1500 req/day = ~1/min sustained, but allows bursts
+            api_key: Gemini API key (prefer GOOGLE_API_KEY). Do NOT fall back to Google Maps key.
+            model: Gemini model name.
+            min_delay_s: Minimum spacing between Gemini calls (global, per process).
+            max_retries: Retries on rate limit / transient errors.
+            backoff_base_s: Base for exponential backoff.
+            backoff_cap_s: Max sleep between retries.
         """
-        self.api_key = api_key or os.getenv("GOOGLE_API_KEY") or os.getenv("GOOGLE_MAPS_API_KEY")
+        # IMPORTANT: do not fall back to GOOGLE_MAPS_API_KEY for Gemini calls
+        self.api_key = api_key or os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
         if not self.api_key:
-            raise ValueError("Google API key not found in environment")
+            raise ValueError("Gemini API key not found (set GOOGLE_API_KEY or GEMINI_API_KEY)")
 
         genai.configure(api_key=self.api_key)
+        self.model_name = model
         self.model = genai.GenerativeModel(model)
-        self.rate_limit_delay = rate_limit_delay
+
+        self.min_delay_s = float(min_delay_s)
+        self.max_retries = int(max_retries)
+        self.backoff_base_s = float(backoff_base_s)
+        self.backoff_cap_s = float(backoff_cap_s)
 
         # Load scoring prompt
         prompt_path = Path(__file__).parent.parent / "prompts" / "scoring_v1.txt"
@@ -42,177 +63,24 @@ class GeminiPropertyScorer:
             with open(prompt_path, "r") as f:
                 self.scoring_prompt = f.read()
         else:
-            # Fallback prompt if file doesn't exist
-            self.scoring_prompt = """Analyze this property image and provide a JSON response with:
+            # Keep fallback aligned with what _create_property_score can parse
+            self.scoring_prompt = """Return ONLY valid JSON with this schema:
 {
-  "overall_score": 1-10,
-  "reasoning": "brief explanation",
-  "component_scores": {
-    "roof": 1-10,
-    "siding": 1-10,
-    "landscaping": 1-10,
-    "vacancy_signals": 1-10
-  },
-  "confidence": "high|medium|low"
+  "property_score": 0-100,
+  "confidence_level": "high|medium|low",
+  "recommendation": "skip|review|pursue",
+  "brief_reasoning": "short explanation",
+  "primary_indicators_observed": ["..."],
+  "image_quality_issues": "optional string or null"
 }
-
-Score 10 = severe distress, 1 = excellent condition"""
+Scoring: 100 = severe distress, 0 = excellent condition.
+"""
 
     def score(self, street_view: StreetViewImage) -> Optional[PropertyScore]:
-        """
-        Score a property based on Street View imagery.
-
-        Args:
-            street_view: Street View image data
-
-        Returns:
-            PropertyScore if successful, None otherwise
-        """
+        """Score a property based on Street View imagery."""
         if not street_view.image_available or not street_view.image_data:
             logger.warning("No image data available for scoring")
             return None
 
         try:
-            logger.info("Sending image to Gemini for scoring...")
-
-            # Create image part
-            image_part = {
-                "mime_type": "image/jpeg",
-                "data": street_view.image_data
-            }
-
-            # Call Gemini API
-            response = self.model.generate_content([
-                image_part,
-                self.scoring_prompt
-            ])
-
-            # Extract text response
-            response_text = response.text
-
-            # Parse JSON response
-            score_data = self._parse_response(response_text)
-
-            # Rate limiting: Wait before next API call to avoid quota
-            if self.rate_limit_delay > 0:
-                logger.info(f"Rate limiting: waiting {self.rate_limit_delay}s before next request...")
-                time.sleep(self.rate_limit_delay)
-
-            if score_data:
-                return self._create_property_score(score_data)
-            else:
-                logger.error("Failed to parse scoring response")
-                return None
-
-        except Exception as e:
-            logger.error(f"Gemini scoring error: {e}")
-            return None
-
-    def score_multiple(self, street_view: StreetViewImage, image_urls: List[str]) -> List[Optional[PropertyScore]]:
-        """
-        Score multiple angles of the same property.
-
-        Args:
-            street_view: Street View image data (not used, just for compatibility)
-            image_urls: List of image URLs to score
-
-        Returns:
-            List of PropertyScore objects (one per angle)
-        """
-        import requests
-
-        scores = []
-        angle_names = ["North", "East", "South", "West"]
-
-        for idx, url in enumerate(image_urls):
-            try:
-                # Fetch image data
-                response = requests.get(url, timeout=15)
-                response.raise_for_status()
-                image_data = response.content
-
-                # Create temporary StreetViewImage
-                temp_sv = StreetViewImage(
-                    image_url=url,
-                    image_data=image_data,
-                    image_available=True
-                )
-
-                # Score this angle
-                logger.info(f"Scoring {angle_names[idx]} angle...")
-                score = self.score(temp_sv)
-
-                if score:
-                    # Add angle name to reasoning
-                    score.reasoning = f"[{angle_names[idx]} View] {score.reasoning}"
-                    score.scoring_model = f"{self.model._model_name} ({angle_names[idx]})"
-
-                scores.append(score)
-
-            except Exception as e:
-                logger.error(f"Error scoring angle {idx}: {e}")
-                scores.append(None)
-
-        return scores
-
-    def _parse_response(self, response_text: str) -> Optional[dict]:
-        """
-        Parse Gemini's JSON response.
-
-        Args:
-            response_text: Raw response text
-
-        Returns:
-            Parsed JSON dict or None if parsing fails
-        """
-        try:
-            # Try to parse as JSON directly
-            return json.loads(response_text)
-        except json.JSONDecodeError:
-            # Try to extract JSON from markdown code block
-            if "```json" in response_text:
-                try:
-                    json_str = response_text.split("```json")[1].split("```")[0].strip()
-                    return json.loads(json_str)
-                except (IndexError, json.JSONDecodeError):
-                    pass
-
-            # Try to find JSON object in text
-            try:
-                start = response_text.index("{")
-                end = response_text.rindex("}") + 1
-                json_str = response_text[start:end]
-                return json.loads(json_str)
-            except (ValueError, json.JSONDecodeError):
-                pass
-
-            logger.error(f"Could not parse JSON from response: {response_text[:200]}")
-            return None
-
-    def _create_property_score(self, score_data: dict) -> PropertyScore:
-        """
-        Create PropertyScore model from parsed response.
-
-        Args:
-            score_data: Parsed JSON response (new format with 0-100 scale)
-
-        Returns:
-            PropertyScore instance
-        """
-        from .models import ConfidenceLevel, RecommendationLevel
-
-        # Parse confidence level
-        confidence = ConfidenceLevel(score_data["confidence_level"].lower())
-
-        # Parse recommendation level
-        recommendation = RecommendationLevel(score_data["recommendation"].lower())
-
-        return PropertyScore(
-            property_score=score_data["property_score"],
-            confidence_level=confidence,
-            primary_indicators_observed=score_data.get("primary_indicators_observed", []),
-            recommendation=recommendation,
-            brief_reasoning=score_data["brief_reasoning"],
-            image_quality_issues=score_data.get("image_quality_issues"),
-            scoring_model=self.model._model_name
-        )
+            im
