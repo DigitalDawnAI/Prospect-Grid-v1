@@ -2,14 +2,24 @@
 
 import os
 import logging
-from typing import Optional, Tuple
+from typing import Optional, Tuple, NamedTuple
 import requests
 from dotenv import load_dotenv
 
 from .models import GeocodedProperty, StreetViewImage
+from .geo_utils import calculate_bearing
 
 load_dotenv()
 logger = logging.getLogger(__name__)
+
+
+class PanoMetadata(NamedTuple):
+    """Street View panorama metadata."""
+    available: bool
+    image_date: Optional[str]
+    pano_id: Optional[str]
+    pano_lat: Optional[float]
+    pano_lng: Optional[float]
 
 
 class StreetViewFetcher:
@@ -28,19 +38,22 @@ class StreetViewFetcher:
         self,
         property: GeocodedProperty,
         size: str = "640x640",
-        fov: int = 90,
-        pitch: int = 10,
+        fov: int = 80,
+        pitch: int = 5,
         multi_angle: bool = False
     ) -> Optional[StreetViewImage]:
         """
         Fetch Street View image(s) for a property.
 
+        Uses bearing calculation to get front-facing images instead of
+        arbitrary heading values.
+
         Args:
             property: Geocoded property with coordinates
             size: Image size (default: 640x640)
-            fov: Field of view in degrees (default: 90)
-            pitch: Camera pitch (default: 10)
-            multi_angle: If True, fetch 4 images (N, S, E, W). If False, fetch 1 smart image.
+            fov: Field of view in degrees (default: 80 for better framing)
+            pitch: Camera pitch (default: 5 to capture roofline)
+            multi_angle: If True, fetch 3 front-facing angles. If False, fetch 1 optimal image.
 
         Returns:
             StreetViewImage if available, None otherwise
@@ -56,12 +69,25 @@ class StreetViewFetcher:
                 image_available=False
             )
 
-        image_available, image_date, pano_id = metadata
+        # Calculate front-facing heading using bearing from camera to property
+        if metadata.pano_lat is not None and metadata.pano_lng is not None:
+            heading = calculate_bearing(
+                from_lat=metadata.pano_lat,
+                from_lng=metadata.pano_lng,
+                to_lat=property.latitude,
+                to_lng=property.longitude
+            )
+            logger.info(f"Calculated front-facing heading: {heading:.1f}° for {property.address_full}")
+        else:
+            # Fallback to property-relative heading if pano location unavailable
+            heading = 135  # SE as fallback
+            logger.warning(f"Pano location unavailable, using fallback heading {heading}°")
 
         if multi_angle:
-            # Fetch 4 images from different angles
-            image_urls = self._fetch_multi_angle_urls(location, size, fov, pitch)
-            # Use first image as primary
+            # Fetch 3 front-facing angles instead of cardinal NESW
+            image_urls = self._fetch_multi_angle_urls_optimized(
+                location, size, fov, pitch, primary_heading=int(heading)
+            )
             image_url = image_urls[0] if image_urls else ""
             image_data = None  # Don't fetch data for multiple images
 
@@ -69,21 +95,23 @@ class StreetViewFetcher:
                 image_url=image_url,
                 image_urls_multi_angle=image_urls,
                 image_data=image_data,
-                image_date=image_date,
-                pano_id=pano_id,
-                image_available=image_available
+                image_date=metadata.image_date,
+                pano_id=metadata.pano_id,
+                image_available=metadata.available
             )
         else:
-            # Fetch single image with smart heading (default to Southeast - 135°)
-            image_url = self._construct_image_url(location, size, fov, pitch, heading=135)
+            # Fetch single image with computed front-facing heading
+            image_url = self._construct_image_url(
+                location, size, fov, pitch, heading=int(heading)
+            )
             image_data = self._fetch_image_data(image_url)
 
             return StreetViewImage(
                 image_url=image_url,
                 image_data=image_data,
-                image_date=image_date,
-                pano_id=pano_id,
-                image_available=image_available
+                image_date=metadata.image_date,
+                pano_id=metadata.pano_id,
+                image_available=metadata.available
             )
 
     def _fetch_multi_angle_urls(
@@ -95,6 +123,9 @@ class StreetViewFetcher:
     ) -> list[str]:
         """
         Fetch Street View image URLs from 4 cardinal directions.
+
+        DEPRECATED: Use _fetch_multi_angle_urls_optimized instead for
+        front-facing images.
 
         Args:
             location: Lat,lng string
@@ -114,12 +145,59 @@ class StreetViewFetcher:
 
         return urls
 
-    def _check_metadata(self, location: str) -> Optional[Tuple[bool, Optional[str], Optional[str]]]:
+    def _fetch_multi_angle_urls_optimized(
+        self,
+        location: str,
+        size: str,
+        fov: int,
+        pitch: int,
+        primary_heading: int,
+        spread_degrees: int = 25
+    ) -> list[str]:
+        """
+        Fetch Street View image URLs from front-facing angles.
+
+        Instead of cardinal directions (NESW), this generates 3 headings
+        around the computed front-facing direction:
+        - Primary (direct front)
+        - Front-left (primary - 25°)
+        - Front-right (primary + 25°)
+
+        Args:
+            location: Lat,lng string
+            size: Image size
+            fov: Field of view
+            pitch: Camera pitch
+            primary_heading: Computed front-facing heading (0-360)
+            spread_degrees: Angular offset for left/right views
+
+        Returns:
+            List of 3 image URLs (Front, Front-Left, Front-Right)
+        """
+        headings = [
+            primary_heading,
+            (primary_heading - spread_degrees) % 360,
+            (primary_heading + spread_degrees) % 360,
+        ]
+        urls = []
+
+        for heading in headings:
+            url = self._construct_image_url(location, size, fov, pitch, int(heading))
+            urls.append(url)
+
+        return urls
+
+    def _check_metadata(self, location: str) -> Optional[PanoMetadata]:
         """
         Check if Street View imagery is available for location.
 
         Returns:
-            Tuple of (available, date, pano_id) or None if not available
+            PanoMetadata with availability, date, pano_id, and camera location.
+            Returns None if no imagery available.
+
+        Note:
+            The returned pano_lat/pano_lng is the CAMERA position, not the property.
+            This is crucial for calculating front-facing heading.
         """
         try:
             params = {
@@ -135,8 +213,20 @@ class StreetViewFetcher:
             if data["status"] == "OK":
                 image_date = data.get("date", None)  # Format: "YYYY-MM"
                 pano_id = data.get("pano_id", None)
-                return (True, image_date, pano_id)
+                # Extract camera location (this is WHERE the panorama was taken)
+                pano_location = data.get("location", {})
+                pano_lat = pano_location.get("lat")
+                pano_lng = pano_location.get("lng")
+
+                return PanoMetadata(
+                    available=True,
+                    image_date=image_date,
+                    pano_id=pano_id,
+                    pano_lat=pano_lat,
+                    pano_lng=pano_lng
+                )
             else:
+                logger.info(f"No Street View coverage at {location}: {data['status']}")
                 return None
 
         except Exception as e:
