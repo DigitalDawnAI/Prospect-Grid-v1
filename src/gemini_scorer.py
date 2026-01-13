@@ -36,7 +36,7 @@ class GeminiPropertyScorer:
     ):
         """
         Args:
-            api_key: Gemini API key (prefer GOOGLE_API_KEY). Do NOT fall back to Google Maps key.
+            api_key: Gemini API key. Do NOT fall back to Google Maps key.
             model: Gemini model name.
             min_delay_s: Minimum spacing between Gemini calls (global, per process).
             max_retries: Retries on rate limit / transient errors.
@@ -44,9 +44,9 @@ class GeminiPropertyScorer:
             backoff_cap_s: Max sleep between retries.
         """
         # IMPORTANT: do not fall back to GOOGLE_MAPS_API_KEY for Gemini calls
-        self.api_key = api_key or os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+        self.api_key = api_key or os.getenv("GEMINI_API_KEY")
         if not self.api_key:
-            raise ValueError("Gemini API key not found (set GOOGLE_API_KEY or GEMINI_API_KEY)")
+            raise ValueError("Gemini API key not found (set GEMINI_API_KEY)")
 
         genai.configure(api_key=self.api_key)
         self.model_name = model
