@@ -37,6 +37,8 @@ class Cache:
     TTL_GEOCODE = 86400 * 30      # 30 days for geocode results
     TTL_COVERAGE = 86400 * 30     # 30 days for positive coverage
     TTL_NO_COVERAGE = 86400 * 7   # 7 days for negative coverage (Street View updates quarterly)
+    TTL_SESSION = 86400           # 24 hours for upload sessions
+    TTL_CAMPAIGN = 86400 * 7      # 7 days for campaign results
 
     def __init__(self, redis_url: Optional[str] = None):
         """
@@ -178,6 +180,32 @@ class Cache:
         lat_rounded = round(lat, 5)
         lng_rounded = round(lng, 5)
         return f"sv:{lat_rounded}:{lng_rounded}"
+
+    @staticmethod
+    def session_key(session_id: str) -> str:
+        """
+        Generate cache key for upload sessions.
+
+        Args:
+            session_id: Unique session identifier (UUID)
+
+        Returns:
+            Cache key in format "session:{session_id}"
+        """
+        return f"session:{session_id}"
+
+    @staticmethod
+    def campaign_key(campaign_id: str) -> str:
+        """
+        Generate cache key for campaign data.
+
+        Args:
+            campaign_id: Unique campaign identifier (UUID)
+
+        Returns:
+            Cache key in format "campaign:{campaign_id}"
+        """
+        return f"campaign:{campaign_id}"
 
 
 # Singleton instance for easy access
