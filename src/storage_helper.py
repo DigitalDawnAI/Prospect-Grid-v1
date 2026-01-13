@@ -5,7 +5,7 @@ import json
 import os
 from pathlib import Path
 from typing import Dict, Any, Optional
-from datetime import datetime
+from datetime import datetime, date
 import logging
 
 logger = logging.getLogger(__name__)
@@ -13,12 +13,22 @@ logger = logging.getLogger(__name__)
 # Use /tmp on Railway - it's ephemeral but works for short-term storage
 # For production, should use PostgreSQL or Redis
 # Single Railway instance means /tmp will work for same-request access
-STORAGE_DIR = Path(os.getenv('STORAGE_DIR', '/tmp/prospectgrid_sessions'))
+STORAGE_DIR = Path(os.getenv("STORAGE_DIR", "/tmp/prospectgrid_sessions"))
 
 
-def _ensure_storage_dir():
+def _ensure_storage_dir() -> None:
     """Create storage directory if it doesn't exist"""
     STORAGE_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _json_default(o: Any) -> Any:
+    """
+    JSON serializer for objects not serializable by default json code.
+    Converts datetime/date to ISO-8601 strings.
+    """
+    if isinstance(o, (datetime, date)):
+        return o.isoformat()
+    raise TypeError(f"Object of type {o.__class__.__name__} is not JSON serializable")
 
 
 def save_session(session_id: str, data: Dict[str, Any]) -> None:
@@ -32,11 +42,11 @@ def save_session(session_id: str, data: Dict[str, Any]) -> None:
     try:
         _ensure_storage_dir()
         file_path = STORAGE_DIR / f"session_{session_id}.json"
-        with open(file_path, 'w') as f:
-            json.dump(data, f, indent=2)
+        with open(file_path, "w") as f:
+            json.dump(data, f, indent=2, default=_json_default)
         logger.info(f"Saved session {session_id} to {file_path}")
     except Exception as e:
-        logger.error(f"Failed to save session {session_id}: {e}")
+        logger.error(f"Failed to save session {session_id}: {e}", exc_info=True)
         raise
 
 
@@ -56,12 +66,12 @@ def load_session(session_id: str) -> Optional[Dict[str, Any]]:
             logger.warning(f"Session {session_id} not found at {file_path}")
             return None
 
-        with open(file_path, 'r') as f:
+        with open(file_path, "r") as f:
             data = json.load(f)
 
         # Check if expired
-        if 'expires_at' in data:
-            expires_at = datetime.fromisoformat(data['expires_at'])
+        if "expires_at" in data:
+            expires_at = datetime.fromisoformat(data["expires_at"])
             if datetime.now() > expires_at:
                 logger.info(f"Session {session_id} expired, deleting")
                 file_path.unlink()
@@ -70,7 +80,7 @@ def load_session(session_id: str) -> Optional[Dict[str, Any]]:
         logger.info(f"Loaded session {session_id} from {file_path}")
         return data
     except Exception as e:
-        logger.error(f"Failed to load session {session_id}: {e}")
+        logger.error(f"Failed to load session {session_id}: {e}", exc_info=True)
         return None
 
 
@@ -87,7 +97,7 @@ def delete_session(session_id: str) -> None:
             file_path.unlink()
             logger.info(f"Deleted session {session_id}")
     except Exception as e:
-        logger.error(f"Failed to delete session {session_id}: {e}")
+        logger.error(f"Failed to delete session {session_id}: {e}", exc_info=True)
 
 
 def save_campaign(campaign_id: str, data: Dict[str, Any]) -> None:
@@ -101,11 +111,11 @@ def save_campaign(campaign_id: str, data: Dict[str, Any]) -> None:
     try:
         _ensure_storage_dir()
         file_path = STORAGE_DIR / f"campaign_{campaign_id}.json"
-        with open(file_path, 'w') as f:
-            json.dump(data, f, indent=2)
+        with open(file_path, "w") as f:
+            json.dump(data, f, indent=2, default=_json_default)
         logger.info(f"Saved campaign {campaign_id} to {file_path}")
     except Exception as e:
-        logger.error(f"Failed to save campaign {campaign_id}: {e}")
+        logger.error(f"Failed to save campaign {campaign_id}: {e}", exc_info=True)
         raise
 
 
@@ -125,7 +135,9 @@ def load_campaign(campaign_id: str) -> Optional[Dict[str, Any]]:
         # Debug: List all files in storage directory
         if STORAGE_DIR.exists():
             all_files = list(STORAGE_DIR.glob("*.json"))
-            logger.info(f"Storage dir has {len(all_files)} files: {[f.name for f in all_files[:5]]}")
+            logger.info(
+                f"Storage dir has {len(all_files)} files: {[f.name for f in all_files[:5]]}"
+            )
         else:
             logger.warning(f"Storage directory {STORAGE_DIR} does not exist!")
 
@@ -134,7 +146,7 @@ def load_campaign(campaign_id: str) -> Optional[Dict[str, Any]]:
             logger.warning(f"Looking for: campaign_{campaign_id}.json")
             return None
 
-        with open(file_path, 'r') as f:
+        with open(file_path, "r") as f:
             data = json.load(f)
 
         logger.info(f"Loaded campaign {campaign_id} from {file_path}")
@@ -156,18 +168,18 @@ def cleanup_expired_sessions() -> None:
         count = 0
         for file_path in STORAGE_DIR.glob("session_*.json"):
             try:
-                with open(file_path, 'r') as f:
+                with open(file_path, "r") as f:
                     data = json.load(f)
 
-                if 'expires_at' in data:
-                    expires_at = datetime.fromisoformat(data['expires_at'])
+                if "expires_at" in data:
+                    expires_at = datetime.fromisoformat(data["expires_at"])
                     if datetime.now() > expires_at:
                         file_path.unlink()
                         count += 1
             except Exception as e:
-                logger.error(f"Failed to process {file_path}: {e}")
+                logger.error(f"Failed to process {file_path}: {e}", exc_info=True)
 
         if count > 0:
             logger.info(f"Cleaned up {count} expired sessions")
     except Exception as e:
-        logger.error(f"Failed to cleanup expired sessions: {e}")
+        logger.error(f"Failed to cleanup expired sessions: {e}", exc_info=True)
