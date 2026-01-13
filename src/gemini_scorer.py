@@ -103,13 +103,14 @@ Scoring: 100 = severe distress, 0 = excellent condition.
         """
         Score multiple angles of the same property.
 
-        Note: This makes N separate Gemini calls. With 4 images per address, keep
-        concurrency low elsewhere or you will hit rate limits.
+        Note: This makes N separate Gemini calls. With 3 images per address
+        (front-facing angles), keep concurrency low elsewhere or you will hit rate limits.
         """
         import requests
 
         scores: List[Optional[PropertyScore]] = []
-        angle_names = ["North", "East", "South", "West"]
+        # Updated for front-facing angles (3 images instead of 4 cardinal)
+        angle_names = ["Front", "Front-Left", "Front-Right", "Angle4", "Angle5"]
 
         for idx, url in enumerate(image_urls):
             try:
