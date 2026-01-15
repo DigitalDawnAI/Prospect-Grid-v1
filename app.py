@@ -147,25 +147,10 @@ def get_estimate(session_id: str):
             {
                 "address_count": address_count,
                 "costs": {
-                    "streetview_standard": {
-                        "subtotal": round(streetview_standard_total, 2),
-                        "price": round(streetview_standard_total * 1.5, 2),
-                        "description": "1 optimized angle",
-                    },
-                    "streetview_premium": {
-                        "subtotal": round(streetview_premium_total, 2),
-                        "price": round(streetview_premium_total * 1.5, 2),
-                        "description": "4 angles (N, E, S, W)",
-                    },
                     "full_scoring_standard": {
                         "subtotal": round(full_scoring_standard_total, 2),
                         "price": round(full_scoring_standard_total * 1.5, 2),
                         "description": "AI scoring (1 angle scored with Gemini)",
-                    },
-                    "full_scoring_premium": {
-                        "subtotal": round(full_scoring_premium_total, 2),
-                        "price": round(full_scoring_premium_total * 1.5, 2),
-                        "description": "AI scoring (4 angles scored with Gemini)",
                     },
                 },
             }
@@ -204,14 +189,8 @@ def create_checkout_session():
         scoring_cost_standard = address_count * gemini_cost_per_image
         scoring_cost_premium = address_count * (gemini_cost_per_image * 4)
 
-        if service_level == "streetview_standard":
-            total = geocoding_cost + streetview_cost_standard
-        elif service_level == "streetview_premium":
-            total = geocoding_cost + streetview_cost_premium
-        elif service_level == "full_scoring_standard":
+        if service_level == "full_scoring_standard":
             total = geocoding_cost + streetview_cost_standard + scoring_cost_standard
-        elif service_level == "full_scoring_premium":
-            total = geocoding_cost + streetview_cost_premium + scoring_cost_premium
         else:
             return jsonify({"error": "Invalid service level"}), 400
 
@@ -331,6 +310,9 @@ def start_processing(session_id: str):
         service_level = data.get("service_level", "full_scoring_standard")
         email = data.get("email")
         payment_intent_id = data.get("payment_intent_id")
+
+        if service_level != "full_scoring_standard":
+            return jsonify({"error": "Invalid service level"}), 400
 
         street_view_mode = "premium" if "premium" in service_level else "standard"
 
