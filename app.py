@@ -119,8 +119,8 @@ def upload_csv():
 @app.route("/api/estimate/<session_id>", methods=["GET"])
 def get_estimate(session_id: str):
     """
-    Get cost estimate for a session
-    Returns: cost breakdown
+    Get cost estimate for a session.
+    Only full_scoring_standard is supported. Legacy tiers have been deprecated.
     """
     try:
         session = load_session(session_id)
@@ -129,43 +129,22 @@ def get_estimate(session_id: str):
 
         address_count = len(session["addresses"])
 
+        # Cost calculation for full_scoring_standard only
         geocoding_cost = address_count * 0.005
-        streetview_cost_standard = address_count * 0.007
-        streetview_cost_premium = address_count * 0.028
-
+        streetview_cost = address_count * 0.007
         gemini_cost_per_image = 0.000075
-        scoring_cost_standard = address_count * gemini_cost_per_image
-        scoring_cost_premium = address_count * (gemini_cost_per_image * 4)
+        scoring_cost = address_count * gemini_cost_per_image
 
-        streetview_standard_total = geocoding_cost + streetview_cost_standard
-        streetview_premium_total = geocoding_cost + streetview_cost_premium
-
-        full_scoring_standard_total = streetview_standard_total + scoring_cost_standard
-        full_scoring_premium_total = streetview_premium_total + scoring_cost_premium
+        full_scoring_standard_total = geocoding_cost + streetview_cost + scoring_cost
 
         return jsonify(
             {
                 "address_count": address_count,
                 "costs": {
-                    "streetview_standard": {
-                        "subtotal": round(streetview_standard_total, 2),
-                        "price": round(streetview_standard_total * 1.5, 2),
-                        "description": "1 optimized angle",
-                    },
-                    "streetview_premium": {
-                        "subtotal": round(streetview_premium_total, 2),
-                        "price": round(streetview_premium_total * 1.5, 2),
-                        "description": "4 angles (N, E, S, W)",
-                    },
                     "full_scoring_standard": {
                         "subtotal": round(full_scoring_standard_total, 2),
                         "price": round(full_scoring_standard_total * 1.5, 2),
                         "description": "AI scoring (1 angle scored with Gemini)",
-                    },
-                    "full_scoring_premium": {
-                        "subtotal": round(full_scoring_premium_total, 2),
-                        "price": round(full_scoring_premium_total * 1.5, 2),
-                        "description": "AI scoring (4 angles scored with Gemini)",
                     },
                 },
             }
@@ -178,6 +157,10 @@ def get_estimate(session_id: str):
 
 @app.route("/api/create-checkout-session", methods=["POST"])
 def create_checkout_session():
+    """
+    Create a Stripe checkout session.
+    Only full_scoring_standard is supported. Legacy tiers have been deprecated.
+    """
     try:
         if os.getenv("MAINTENANCE_MODE", "false").lower() == "true":
             return jsonify({"error": "Service temporarily unavailable for maintenance. Please check back soon."}), 503
@@ -190,31 +173,23 @@ def create_checkout_session():
         if not upload_session_id or not service_level:
             return jsonify({"error": "Missing required fields"}), 400
 
+        # Only full_scoring_standard is supported
+        if service_level != "full_scoring_standard":
+            return jsonify({"error": "Service level no longer supported. Please purchase Full AI Scoring Standard."}), 400
+
         session = load_session(upload_session_id)
         if not session:
             return jsonify({"error": "Session not found or expired"}), 404
 
         address_count = len(session["addresses"])
 
+        # Cost calculation for full_scoring_standard only
         geocoding_cost = address_count * 0.005
-        streetview_cost_standard = address_count * 0.007
-        streetview_cost_premium = address_count * 0.028
-
+        streetview_cost = address_count * 0.007
         gemini_cost_per_image = 0.000075
-        scoring_cost_standard = address_count * gemini_cost_per_image
-        scoring_cost_premium = address_count * (gemini_cost_per_image * 4)
+        scoring_cost = address_count * gemini_cost_per_image
 
-        if service_level == "streetview_standard":
-            total = geocoding_cost + streetview_cost_standard
-        elif service_level == "streetview_premium":
-            total = geocoding_cost + streetview_cost_premium
-        elif service_level == "full_scoring_standard":
-            total = geocoding_cost + streetview_cost_standard + scoring_cost_standard
-        elif service_level == "full_scoring_premium":
-            total = geocoding_cost + streetview_cost_premium + scoring_cost_premium
-        else:
-            return jsonify({"error": "Invalid service level"}), 400
-
+        total = geocoding_cost + streetview_cost + scoring_cost
         final_price = total * 1.5
         amount_cents = max(int(final_price * 100), 50)
 
@@ -225,7 +200,7 @@ def create_checkout_session():
                     "price_data": {
                         "currency": "usd",
                         "product_data": {
-                            "name": f"ProspectGrid - {service_level.replace('_', ' ').title()}",
+                            "name": "ProspectGrid - Full AI Scoring Standard",
                             "description": f"AI property analysis for {address_count} properties",
                         },
                         "unit_amount": amount_cents,
@@ -239,7 +214,7 @@ def create_checkout_session():
             customer_email=email,
             metadata={
                 "upload_session_id": upload_session_id,
-                "service_level": service_level,
+                "service_level": "full_scoring_standard",
                 "address_count": address_count,
             },
         )
@@ -254,8 +229,8 @@ def create_checkout_session():
 @app.route("/api/verify-payment/<stripe_session_id>", methods=["POST"])
 def verify_payment(stripe_session_id: str):
     """
-    Verify Stripe payment and start processing
-    Returns: campaign_id
+    Verify Stripe payment and start processing.
+    Only full_scoring_standard is supported. Legacy tiers have been deprecated.
     """
     try:
         if os.getenv("MAINTENANCE_MODE", "false").lower() == "true":
@@ -268,19 +243,21 @@ def verify_payment(stripe_session_id: str):
         upload_session_id = checkout_session.metadata["upload_session_id"]
         service_level = checkout_session.metadata["service_level"]
 
+        # Only full_scoring_standard is supported
+        if service_level != "full_scoring_standard":
+            return jsonify({"error": "Service level no longer supported. Please purchase Full AI Scoring Standard."}), 400
+
         session = load_session(upload_session_id)
         if not session:
             return jsonify({"error": "Session not found or expired"}), 404
-
-        street_view_mode = "premium" if "premium" in service_level else "standard"
 
         campaign_id = str(uuid.uuid4())
         campaign_data = {
             "campaign_id": campaign_id,
             "session_id": upload_session_id,
             "email": checkout_session.customer_email,
-            "service_level": service_level,
-            "street_view_mode": street_view_mode,
+            "service_level": "full_scoring_standard",
+            "street_view_mode": "standard",
             "payment_intent_id": checkout_session.payment_intent,
             "stripe_session_id": stripe_session_id,
             "status": "processing",
@@ -316,32 +293,54 @@ def verify_payment(stripe_session_id: str):
 @app.route("/api/process/<session_id>", methods=["POST"])
 def start_processing(session_id: str):
     """
-    Start processing a session (non-Stripe path)
-    Returns: campaign_id
+    Start processing a session after payment verification.
+    Requires stripe_session_id in request body. Only full_scoring_standard is supported.
     """
     try:
         if os.getenv("MAINTENANCE_MODE", "false").lower() == "true":
             return jsonify({"error": "Service temporarily unavailable for maintenance. Please check back soon."}), 503
 
+        data = request.json or {}
+        stripe_session_id = data.get("stripe_session_id")
+
+        # Require Stripe session ID for payment verification
+        if not stripe_session_id:
+            return jsonify({"error": "Payment required. Missing stripe_session_id."}), 400
+
+        # Verify payment with Stripe
+        try:
+            checkout_session = stripe.checkout.Session.retrieve(stripe_session_id)
+        except stripe.error.StripeError as e:
+            logger.error(f"Stripe session retrieval error: {e}", exc_info=True)
+            return jsonify({"error": "Payment verification failed"}), 400
+
+        # Verify payment status
+        if checkout_session.payment_status != "paid":
+            return jsonify({"error": "Payment not completed"}), 400
+
+        # Verify metadata matches
+        metadata_session_id = checkout_session.metadata.get("upload_session_id")
+        if metadata_session_id != session_id:
+            return jsonify({"error": "Payment session mismatch"}), 400
+
+        # Verify service level
+        service_level = checkout_session.metadata.get("service_level")
+        if service_level != "full_scoring_standard":
+            return jsonify({"error": "Service level no longer supported. Please purchase Full AI Scoring Standard."}), 400
+
         session = load_session(session_id)
         if not session:
             return jsonify({"error": "Session not found or expired"}), 404
-
-        data = request.json or {}
-        service_level = data.get("service_level", "full_scoring_standard")
-        email = data.get("email")
-        payment_intent_id = data.get("payment_intent_id")
-
-        street_view_mode = "premium" if "premium" in service_level else "standard"
 
         campaign_id = str(uuid.uuid4())
         campaign_data = {
             "campaign_id": campaign_id,
             "session_id": session_id,
-            "email": email,
-            "service_level": service_level,
-            "street_view_mode": street_view_mode,
-            "payment_intent_id": payment_intent_id,
+            "email": checkout_session.customer_email,
+            "service_level": "full_scoring_standard",
+            "street_view_mode": "standard",
+            "payment_intent_id": checkout_session.payment_intent,
+            "stripe_session_id": stripe_session_id,
             "status": "processing",
             "created_at": datetime.now().isoformat(),
             "total_properties": len(session["addresses"]),
@@ -388,7 +387,8 @@ def _score_placeholder(reason: str = "scoring_failed") -> dict:
 
 def process_campaign(campaign_id: str):
     """
-    Process all addresses in a campaign.
+    Process all addresses in a campaign using full_scoring_standard tier.
+    Only single-angle Street View with AI scoring is supported.
     NOTE: /tmp storage is ephemeral and threads are not durable on Railway;
     this is best moved to a real worker + persistent DB.
     """
@@ -402,11 +402,9 @@ def process_campaign(campaign_id: str):
         logger.error(f"Session {campaign['session_id']} not found")
         return
 
-    service_level = campaign["service_level"]
-    street_view_mode = campaign.get("street_view_mode", "standard")
-
-    multi_angle = street_view_mode == "premium"
-    needs_scoring = "full_scoring" in service_level
+    # Hardcoded settings for full_scoring_standard (only supported tier)
+    multi_angle = False
+    needs_scoring = True
 
     for raw_addr_dict in session["addresses"]:
         try:
@@ -429,31 +427,18 @@ def process_campaign(campaign_id: str):
 
             prop = ScoredProperty.from_geocoded(geocoded, campaign_id)
 
-            # Step 2: Street View
+            # Step 2: Street View (single angle)
             street_view = streetview_fetcher.fetch(geocoded, multi_angle=multi_angle)
             if street_view:
                 prop.add_street_view(street_view)
             else:
                 prop.processing_status = ProcessingStatus.NO_IMAGERY
 
-            # Step 3: VLM scoring
+            # Step 3: AI scoring (always enabled for full_scoring_standard)
             if needs_scoring and street_view and street_view.image_available:
-                if multi_angle and getattr(street_view, "image_urls_multi_angle", None):
-                    raw_scores = property_scorer.score_multiple(street_view, street_view.image_urls_multi_angle)
-
-                    # Prevent null entries (frontend crash). Preserve slots with placeholders.
-                    safe_scores = []
-                    for s in (raw_scores or []):
-                        safe_scores.append(s if s is not None else _score_placeholder("scoring_failed"))
-
-                    # If all failed, still attach placeholders so UI can render safely
-                    if safe_scores:
-                        prop.add_scores_multi_angle(safe_scores)
-
-                else:
-                    score = property_scorer.score(street_view)
-                    if score:
-                        prop.add_score(score)
+                score = property_scorer.score(street_view)
+                if score:
+                    prop.add_score(score)
 
             # Persist property
             dumped = prop.model_dump()
@@ -461,27 +446,12 @@ def process_campaign(campaign_id: str):
             campaign["properties"].append(dumped)
             campaign["processed_count"] += 1
 
-            # Count success/failure more safely than ProcessingStatus.COMPLETE
-            # (avoids "scored=1" when no score fields exist)
-            has_any_score = False
-            if dumped.get("score") is not None:
-                has_any_score = True
-            if dumped.get("scores_multi_angle"):
-                # treat any non-null as success (placeholders still count as "not really scored")
-                # If you want placeholders to count as failure, tighten this condition.
-                has_any_score = any(x and not x.get("error") for x in dumped["scores_multi_angle"])
-
-            if needs_scoring:
-                if has_any_score:
-                    campaign["success_count"] += 1
-                else:
-                    campaign["failed_count"] += 1
+            # Count success/failure based on scoring result
+            has_any_score = dumped.get("score") is not None
+            if has_any_score:
+                campaign["success_count"] += 1
             else:
-                # Non-scoring tiers: consider success if imagery exists
-                if street_view and street_view.image_available:
-                    campaign["success_count"] += 1
-                else:
-                    campaign["failed_count"] += 1
+                campaign["failed_count"] += 1
 
             save_campaign(campaign_id, campaign)
 
