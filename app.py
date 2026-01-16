@@ -216,12 +216,6 @@ def create_checkout_session():
         gemini_cost_per_image = 0.000075
         scoring_cost = address_count * gemini_cost_per_image
 
-        # Enforce single tier
-        if service_level != "full_scoring_standard":
-            return jsonify(
-                {"error": "Service level no longer supported. Please purchase Full AI Scoring Standard."}
-            ), 400
-
         total = geocoding_cost + streetview_cost + scoring_cost
         final_price = total * 1.5
         amount_cents = max(int(final_price * 100), 50)
