@@ -58,7 +58,14 @@ def upload_csv():
     """
     try:
         if os.getenv("MAINTENANCE_MODE", "false").lower() == "true":
-            return jsonify({"error": "Service temporarily unavailable for maintenance. Please check back soon."}), 503
+            return (
+                jsonify(
+                    {
+                        "error": "Service temporarily unavailable for maintenance. Please check back soon."
+                    }
+                ),
+                503,
+            )
 
         if "file" not in request.files:
             return jsonify({"error": "No file provided"}), 400
@@ -103,13 +110,16 @@ def upload_csv():
         }
         save_session(session_id, session_data)
 
-        return jsonify(
-            {
-                "session_id": session_id,
-                "address_count": len(addresses),
-                "errors": errors if errors else None,
-            }
-        ), 200
+        return (
+            jsonify(
+                {
+                    "session_id": session_id,
+                    "address_count": len(addresses),
+                    "errors": errors if errors else None,
+                }
+            ),
+            200,
+        )
 
     except Exception as e:
         logger.error(f"Upload error: {e}", exc_info=True)
@@ -137,18 +147,21 @@ def get_estimate(session_id: str):
 
         full_scoring_standard_total = geocoding_cost + streetview_cost + scoring_cost
 
-        return jsonify(
-            {
-                "address_count": address_count,
-                "costs": {
-                    "full_scoring_standard": {
-                        "subtotal": round(full_scoring_standard_total, 2),
-                        "price": round(full_scoring_standard_total * 1.5, 2),
-                        "description": "AI scoring (1 angle scored with Gemini)",
+        return (
+            jsonify(
+                {
+                    "address_count": address_count,
+                    "costs": {
+                        "full_scoring_standard": {
+                            "subtotal": round(full_scoring_standard_total, 2),
+                            "price": round(full_scoring_standard_total * 1.5, 2),
+                            "description": "AI scoring (1 angle scored with Gemini)",
+                        }
                     },
-                },
-            }
-        ), 200
+                }
+            ),
+            200,
+        )
 
     except Exception as e:
         logger.error(f"Estimate error: {e}", exc_info=True)
@@ -163,7 +176,14 @@ def create_checkout_session():
     """
     try:
         if os.getenv("MAINTENANCE_MODE", "false").lower() == "true":
-            return jsonify({"error": "Service temporarily unavailable for maintenance. Please check back soon."}), 503
+            return (
+                jsonify(
+                    {
+                        "error": "Service temporarily unavailable for maintenance. Please check back soon."
+                    }
+                ),
+                503,
+            )
 
         data = request.json or {}
         upload_session_id = data.get("session_id")
@@ -173,9 +193,16 @@ def create_checkout_session():
         if not upload_session_id or not service_level:
             return jsonify({"error": "Missing required fields"}), 400
 
-        # Only full_scoring_standard is supported
+        # Enforce single tier
         if service_level != "full_scoring_standard":
-            return jsonify({"error": "Service level no longer supported. Please purchase Full AI Scoring Standard."}), 400
+            return (
+                jsonify(
+                    {
+                        "error": "Service level no longer supported. Please purchase Full AI Scoring Standard."
+                    }
+                ),
+                400,
+            )
 
         session = load_session(upload_session_id)
         if not session:
@@ -219,7 +246,10 @@ def create_checkout_session():
             },
         )
 
-        return jsonify({"checkout_url": checkout_session.url, "session_id": checkout_session.id}), 200
+        return (
+            jsonify({"checkout_url": checkout_session.url, "session_id": checkout_session.id}),
+            200,
+        )
 
     except Exception as e:
         logger.error(f"Checkout session creation error: {e}", exc_info=True)
@@ -234,30 +264,54 @@ def verify_payment(stripe_session_id: str):
     """
     try:
         if os.getenv("MAINTENANCE_MODE", "false").lower() == "true":
-            return jsonify({"error": "Service temporarily unavailable for maintenance. Please check back soon."}), 503
+            return (
+                jsonify(
+                    {
+                        "error": "Service temporarily unavailable for maintenance. Please check back soon."
+                    }
+                ),
+                503,
+            )
 
         checkout_session = stripe.checkout.Session.retrieve(stripe_session_id)
         if checkout_session.payment_status != "paid":
             return jsonify({"error": "Payment not completed"}), 400
 
-        upload_session_id = checkout_session.metadata["upload_session_id"]
-        service_level = checkout_session.metadata["service_level"]
+        upload_session_id = checkout_session.metadata.get("upload_session_id")
+        service_level = checkout_session.metadata.get("service_level")
 
-        # Only full_scoring_standard is supported
+        # Enforce single tier
         if service_level != "full_scoring_standard":
-            return jsonify({"error": "Service level no longer supported. Please purchase Full AI Scoring Standard."}), 400
+            return (
+                jsonify(
+                    {
+                        "error": "Service level no longer supported. Please purchase Full AI Scoring Standard."
+                    }
+                ),
+                400,
+            )
 
         session = load_session(upload_session_id)
         if not session:
             return jsonify({"error": "Session not found or expired"}), 404
 
+        # Standard tier only: single angle, scoring enabled
+        street_view_mode = "standard"
+
+        # Use verified email from Stripe (fallback to customer_details)
+        email = checkout_session.customer_email or (
+            (checkout_session.customer_details or {}).get("email")
+            if hasattr(checkout_session, "customer_details")
+            else None
+        )
+
         campaign_id = str(uuid.uuid4())
         campaign_data = {
             "campaign_id": campaign_id,
             "session_id": upload_session_id,
-            "email": checkout_session.customer_email,
+            "email": email,
             "service_level": "full_scoring_standard",
-            "street_view_mode": "standard",
+            "street_view_mode": street_view_mode,
             "payment_intent_id": checkout_session.payment_intent,
             "stripe_session_id": stripe_session_id,
             "status": "processing",
@@ -274,13 +328,16 @@ def verify_payment(stripe_session_id: str):
         thread.start()
         logger.info(f"Started background processing thread for campaign {campaign_id}")
 
-        return jsonify(
-            {
-                "campaign_id": campaign_id,
-                "status": "processing",
-                "estimated_time_minutes": len(session["addresses"]) / 20,
-            }
-        ), 200
+        return (
+            jsonify(
+                {
+                    "campaign_id": campaign_id,
+                    "status": "processing",
+                    "estimated_time_minutes": len(session["addresses"]) / 20,
+                }
+            ),
+            200,
+        )
 
     except stripe.error.StripeError as e:
         logger.error(f"Stripe error: {e}", exc_info=True)
@@ -293,52 +350,75 @@ def verify_payment(stripe_session_id: str):
 @app.route("/api/process/<session_id>", methods=["POST"])
 def start_processing(session_id: str):
     """
-    Start processing a session after payment verification.
-    Requires stripe_session_id in request body. Only full_scoring_standard is supported.
+    Start processing a session (requires verified Stripe payment)
+    Returns: campaign_id
     """
     try:
         if os.getenv("MAINTENANCE_MODE", "false").lower() == "true":
-            return jsonify({"error": "Service temporarily unavailable for maintenance. Please check back soon."}), 503
+            return (
+                jsonify(
+                    {
+                        "error": "Service temporarily unavailable for maintenance. Please check back soon."
+                    }
+                ),
+                503,
+            )
 
         data = request.json or {}
         stripe_session_id = data.get("stripe_session_id")
 
-        # Require Stripe session ID for payment verification
         if not stripe_session_id:
-            return jsonify({"error": "Payment required. Missing stripe_session_id."}), 400
+            return jsonify({"error": "Missing required field: stripe_session_id"}), 400
 
-        # Verify payment with Stripe
+        # Retrieve and validate Stripe checkout session
         try:
             checkout_session = stripe.checkout.Session.retrieve(stripe_session_id)
         except stripe.error.StripeError as e:
-            logger.error(f"Stripe session retrieval error: {e}", exc_info=True)
-            return jsonify({"error": "Payment verification failed"}), 400
+            logger.error(f"Stripe error retrieving session: {e}", exc_info=True)
+            return jsonify({"error": "Invalid Stripe session"}), 400
 
-        # Verify payment status
+        # Validate payment completed
         if checkout_session.payment_status != "paid":
             return jsonify({"error": "Payment not completed"}), 400
 
-        # Verify metadata matches
-        metadata_session_id = checkout_session.metadata.get("upload_session_id")
-        if metadata_session_id != session_id:
-            return jsonify({"error": "Payment session mismatch"}), 400
+        # Validate session ID matches
+        if checkout_session.metadata.get("upload_session_id") != session_id:
+            return jsonify({"error": "Session mismatch"}), 400
 
-        # Verify service level
+        # Validate service level
         service_level = checkout_session.metadata.get("service_level")
         if service_level != "full_scoring_standard":
-            return jsonify({"error": "Service level no longer supported. Please purchase Full AI Scoring Standard."}), 400
+            return (
+                jsonify(
+                    {
+                        "error": "Service level no longer supported. Please purchase Full AI Scoring Standard."
+                    }
+                ),
+                400,
+            )
 
+        # Load upload session
         session = load_session(session_id)
         if not session:
             return jsonify({"error": "Session not found or expired"}), 404
+
+        # Use verified email from Stripe (ignore client-provided email)
+        email = checkout_session.customer_email or (
+            (checkout_session.customer_details or {}).get("email")
+            if hasattr(checkout_session, "customer_details")
+            else None
+        )
+
+        # Standard tier only: single angle, scoring enabled
+        street_view_mode = "standard"
 
         campaign_id = str(uuid.uuid4())
         campaign_data = {
             "campaign_id": campaign_id,
             "session_id": session_id,
-            "email": checkout_session.customer_email,
+            "email": email,
             "service_level": "full_scoring_standard",
-            "street_view_mode": "standard",
+            "street_view_mode": street_view_mode,
             "payment_intent_id": checkout_session.payment_intent,
             "stripe_session_id": stripe_session_id,
             "status": "processing",
@@ -355,14 +435,20 @@ def start_processing(session_id: str):
         thread.start()
         logger.info(f"Started background processing thread for campaign {campaign_id}")
 
-        return jsonify(
-            {
-                "campaign_id": campaign_id,
-                "status": "processing",
-                "estimated_time_minutes": len(session["addresses"]) / 20,
-            }
-        ), 200
+        return (
+            jsonify(
+                {
+                    "campaign_id": campaign_id,
+                    "status": "processing",
+                    "estimated_time_minutes": len(session["addresses"]) / 20,
+                }
+            ),
+            200,
+        )
 
+    except stripe.error.StripeError as e:
+        logger.error(f"Stripe error: {e}", exc_info=True)
+        return jsonify({"error": "Payment verification failed"}), 400
     except Exception as e:
         logger.error(f"Processing start error: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
@@ -446,8 +532,8 @@ def process_campaign(campaign_id: str):
             campaign["properties"].append(dumped)
             campaign["processed_count"] += 1
 
-            # Count success/failure based on scoring result
-            has_any_score = dumped.get("score") is not None
+            # Count success/failure based on scoring result (new/legacy fields)
+            has_any_score = dumped.get("property_score") is not None or dumped.get("prospect_score") is not None
             if has_any_score:
                 campaign["success_count"] += 1
             else:
@@ -461,7 +547,9 @@ def process_campaign(campaign_id: str):
             campaign["processed_count"] += 1
             campaign["properties"].append(
                 {
-                    "input_address": raw_addr_dict.get("address") if isinstance(raw_addr_dict, dict) else str(raw_addr_dict),
+                    "input_address": raw_addr_dict.get("address")
+                    if isinstance(raw_addr_dict, dict)
+                    else str(raw_addr_dict),
                     "status": "failed",
                     "error_message": str(e),
                 }
@@ -485,17 +573,20 @@ def get_status(campaign_id: str):
         processed = campaign.get("processed_count") or 0
         progress = round((processed / total) * 100, 1) if total else 0.0
 
-        return jsonify(
-            {
-                "campaign_id": campaign_id,
-                "status": campaign["status"],
-                "total_properties": total,
-                "processed_count": processed,
-                "success_count": campaign.get("success_count", 0),
-                "failed_count": campaign.get("failed_count", 0),
-                "progress_percent": progress,
-            }
-        ), 200
+        return (
+            jsonify(
+                {
+                    "campaign_id": campaign_id,
+                    "status": campaign["status"],
+                    "total_properties": total,
+                    "processed_count": processed,
+                    "success_count": campaign.get("success_count", 0),
+                    "failed_count": campaign.get("failed_count", 0),
+                    "progress_percent": progress,
+                }
+            ),
+            200,
+        )
 
     except Exception as e:
         logger.error(f"Status check error: {e}", exc_info=True)
@@ -509,16 +600,19 @@ def get_results(campaign_id: str):
         if not campaign:
             return jsonify({"error": "Campaign not found"}), 404
 
-        return jsonify(
-            {
-                "campaign_id": campaign_id,
-                "status": campaign["status"],
-                "total_properties": campaign["total_properties"],
-                "success_count": campaign.get("success_count", 0),
-                "failed_count": campaign.get("failed_count", 0),
-                "properties": campaign.get("properties", []),
-            }
-        ), 200
+        return (
+            jsonify(
+                {
+                    "campaign_id": campaign_id,
+                    "status": campaign["status"],
+                    "total_properties": campaign["total_properties"],
+                    "success_count": campaign.get("success_count", 0),
+                    "failed_count": campaign.get("failed_count", 0),
+                    "properties": campaign.get("properties", []),
+                }
+            ),
+            200,
+        )
 
     except Exception as e:
         logger.error(f"Results fetch error: {e}", exc_info=True)
