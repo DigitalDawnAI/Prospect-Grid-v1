@@ -147,10 +147,25 @@ def get_estimate(session_id: str):
             {
                 "address_count": address_count,
                 "costs": {
+                    "streetview_standard": {
+                        "subtotal": round(streetview_standard_total, 2),
+                        "price": round(streetview_standard_total * 1.5, 2),
+                        "description": "1 optimized angle",
+                    },
+                    "streetview_premium": {
+                        "subtotal": round(streetview_premium_total, 2),
+                        "price": round(streetview_premium_total * 1.5, 2),
+                        "description": "4 angles (N, E, S, W)",
+                    },
                     "full_scoring_standard": {
                         "subtotal": round(full_scoring_standard_total, 2),
                         "price": round(full_scoring_standard_total * 1.5, 2),
                         "description": "AI scoring (1 angle scored with Gemini)",
+                    },
+                    "full_scoring_premium": {
+                        "subtotal": round(full_scoring_premium_total, 2),
+                        "price": round(full_scoring_premium_total * 1.5, 2),
+                        "description": "AI scoring (4 angles scored with Gemini)",
                     },
                 },
             }
@@ -190,7 +205,11 @@ def create_checkout_session():
         scoring_cost_premium = address_count * (gemini_cost_per_image * 4)
 
         if service_level != "full_scoring_standard":
+        if service_level != "full_scoring_standard":
             return jsonify({"error": "Service level no longer supported. Please purchase Full AI Scoring Standard."}), 400
+
+        total = geocoding_cost + streetview_cost_standard + scoring_cost_standard
+
 
         total = geocoding_cost + streetview_cost_standard + scoring_cost_standard
 
@@ -249,7 +268,10 @@ def verify_payment(stripe_session_id: str):
 
         # Enforce single tier
         if service_level != "full_scoring_standard":
-            return jsonify({"error": "Service level no longer supported. Please purchase Full AI Scoring Standard."}), 400
+            return jsonify(
+                {"error": "Service level no longer supported. Please purchase Full AI Scoring Standard."}
+            ), 400
+
 
         session = load_session(upload_session_id)
         if not session:
@@ -300,7 +322,8 @@ def verify_payment(stripe_session_id: str):
 @app.route("/api/process/<session_id>", methods=["POST"])
 def start_processing(session_id: str):
     """
-    Start processing a session - requires verified Stripe payment
+    Start processing a session (requires verified Stripe payment)
+
     Returns: campaign_id
     """
     try:
@@ -311,10 +334,15 @@ def start_processing(session_id: str):
         stripe_session_id = data.get("stripe_session_id")
 
         if not stripe_session_id:
+        if not stripe_session_id:
             return jsonify({"error": "Missing required field: stripe_session_id"}), 400
 
         # Retrieve and validate Stripe checkout session
-        checkout_session = stripe.checkout.Session.retrieve(stripe_session_id)
+        try:
+            checkout_session = stripe.checkout.Session.retrieve(stripe_session_id)
+        except stripe.error.StripeError as e:
+            logger.error(f"Stripe error retrieving session: {e}", exc_info=True)
+            return jsonify({"error": "Invalid Stripe session"}), 400
 
         # Validate payment completed
         if checkout_session.payment_status != "paid":
@@ -325,6 +353,7 @@ def start_processing(session_id: str):
             return jsonify({"error": "Session mismatch"}), 400
 
         # Validate service level
+
         service_level = checkout_session.metadata.get("service_level")
         if service_level != "full_scoring_standard":
             return jsonify({"error": "Service level no longer supported. Please purchase Full AI Scoring Standard."}), 400
@@ -334,7 +363,17 @@ def start_processing(session_id: str):
         if not session:
             return jsonify({"error": "Session not found or expired"}), 404
 
+        # Load upload session
+        session = load_session(session_id)
+        if not session:
+            return jsonify({"error": "Session not found or expired"}), 404
+
+        # Use verified email from Stripe (ignore client-provided email)
+        email = checkout_session.customer_email
+
         # Standard tier only: single angle, scoring enabled
+        street_view_mode = "standard"
+
         street_view_mode = "standard"
 
         campaign_id = str(uuid.uuid4())
