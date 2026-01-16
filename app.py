@@ -205,7 +205,6 @@ def create_checkout_session():
         scoring_cost_premium = address_count * (gemini_cost_per_image * 4)
 
         if service_level != "full_scoring_standard":
-        if service_level != "full_scoring_standard":
             return jsonify({"error": "Service level no longer supported. Please purchase Full AI Scoring Standard."}), 400
 
         total = geocoding_cost + streetview_cost_standard + scoring_cost_standard
