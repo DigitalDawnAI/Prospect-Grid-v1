@@ -1,6 +1,8 @@
 """Google Maps geocoding module."""
 
 import os
+import time
+import random
 import logging
 from typing import Optional
 import requests
@@ -13,10 +15,20 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 
+class RetryableError(Exception):
+    """Exception for errors that should trigger a retry."""
+    pass
+
+
 class Geocoder:
     """Handles address geocoding via Google Maps API."""
 
     BASE_URL = "https://maps.googleapis.com/maps/api/geocode/json"
+
+    # Retry configuration
+    MAX_RETRIES = 3
+    BACKOFF_BASE = 1.0  # seconds
+    BACKOFF_CAP = 16.0  # seconds
 
     def __init__(self, api_key: Optional[str] = None):
         """
@@ -60,8 +72,8 @@ class Geocoder:
             logger.info(f"Geocode cache hit for: {address.full_address}")
             return GeocodedProperty(**cached)
 
-        # Cache miss - call API
-        result = self._geocode_api(address)
+        # Cache miss - call API with retry
+        result = self._geocode_with_retry(address)
 
         # Cache successful results
         if result is not None:
@@ -73,6 +85,45 @@ class Geocoder:
 
         return result
 
+    def _geocode_with_retry(self, address: RawAddress) -> Optional[GeocodedProperty]:
+        """
+        Geocode with exponential backoff retry on transient failures.
+
+        Retries on:
+        - OVER_QUERY_LIMIT (rate limiting)
+        - Network timeouts
+        - 5xx server errors
+        """
+        last_error = None
+
+        for attempt in range(self.MAX_RETRIES):
+            try:
+                result = self._geocode_api(address)
+                return result  # Success or permanent failure (ZERO_RESULTS, etc.)
+
+            except RetryableError as e:
+                last_error = e
+                if attempt < self.MAX_RETRIES - 1:
+                    # Exponential backoff with jitter
+                    sleep_time = min(
+                        self.BACKOFF_CAP,
+                        self.BACKOFF_BASE * (2 ** attempt)
+                    )
+                    # Add jitter (±30%)
+                    sleep_time *= (0.7 + 0.6 * random.random())
+                    logger.warning(
+                        f"Geocoding retry {attempt + 1}/{self.MAX_RETRIES} "
+                        f"for {address.full_address}, sleeping {sleep_time:.1f}s: {e}"
+                    )
+                    time.sleep(sleep_time)
+                else:
+                    logger.error(
+                        f"Geocoding failed after {self.MAX_RETRIES} attempts "
+                        f"for {address.full_address}: {e}"
+                    )
+
+        return None
+
     def _geocode_api(self, address: RawAddress) -> Optional[GeocodedProperty]:
         """Make actual API call to Google Maps Geocoding API."""
         try:
@@ -83,6 +134,11 @@ class Geocoder:
 
             logger.info(f"Geocoding (API call): {address.full_address}")
             response = requests.get(self.BASE_URL, params=params, timeout=10)
+
+            # Retry on 5xx errors
+            if response.status_code >= 500:
+                raise RetryableError(f"Server error: {response.status_code}")
+
             response.raise_for_status()
 
             data = response.json()
@@ -93,12 +149,19 @@ class Geocoder:
                 logger.warning(f"No geocoding results for: {address.full_address}")
                 return None
             elif data["status"] == "OVER_QUERY_LIMIT":
-                logger.error("Google Maps API rate limit exceeded")
-                raise Exception("Rate limit exceeded")
+                raise RetryableError("Rate limit exceeded (OVER_QUERY_LIMIT)")
+            elif data["status"] == "UNKNOWN_ERROR":
+                raise RetryableError("Google Maps UNKNOWN_ERROR (transient)")
             else:
                 logger.warning(f"Geocoding failed with status: {data['status']}")
                 return None
 
+        except requests.exceptions.Timeout as e:
+            raise RetryableError(f"Request timeout: {e}")
+        except requests.exceptions.ConnectionError as e:
+            raise RetryableError(f"Connection error: {e}")
+        except RetryableError:
+            raise  # Re-raise retryable errors
         except requests.exceptions.RequestException as e:
             logger.error(f"Geocoding request failed: {e}")
             return None
