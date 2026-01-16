@@ -265,13 +265,12 @@ def verify_payment(stripe_session_id: str):
 
         upload_session_id = checkout_session.metadata["upload_session_id"]
         service_level = checkout_session.metadata["service_level"]
-
+        
         # Enforce single tier
         if service_level != "full_scoring_standard":
             return jsonify(
                 {"error": "Service level no longer supported. Please purchase Full AI Scoring Standard."}
             ), 400
-
 
         session = load_session(upload_session_id)
         if not session:
@@ -279,6 +278,7 @@ def verify_payment(stripe_session_id: str):
 
         # Standard tier only: single angle, scoring enabled
         street_view_mode = "standard"
+
 
         campaign_id = str(uuid.uuid4())
         campaign_data = {
@@ -353,12 +353,12 @@ def start_processing(session_id: str):
             return jsonify({"error": "Session mismatch"}), 400
 
         # Validate service level
-
         service_level = checkout_session.metadata.get("service_level")
         if service_level != "full_scoring_standard":
             return jsonify({"error": "Service level no longer supported. Please purchase Full AI Scoring Standard."}), 400
 
         # Load upload session
+
         session = load_session(session_id)
         if not session:
             return jsonify({"error": "Session not found or expired"}), 404
@@ -370,6 +370,7 @@ def start_processing(session_id: str):
 
         # Use verified email from Stripe (ignore client-provided email)
         email = checkout_session.customer_email
+
 
         # Standard tier only: single angle, scoring enabled
         street_view_mode = "standard"
