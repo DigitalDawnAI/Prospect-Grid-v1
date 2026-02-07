@@ -3,10 +3,16 @@ File-based session storage to persist across Railway deployments
 """
 import json
 import os
+import uuid
 from pathlib import Path
 from typing import Dict, Any, Optional
 from datetime import datetime, date
 import logging
+
+from sqlalchemy import select
+
+from src.db import SessionLocal
+from src.db_models import Campaign, Property
 
 logger = logging.getLogger(__name__)
 
@@ -102,26 +108,81 @@ def delete_session(session_id: str) -> None:
 
 def save_campaign(campaign_id: str, data: Dict[str, Any]) -> None:
     """
-    Save campaign data to disk
+    Save campaign data to PostgreSQL
 
     Args:
         campaign_id: Unique campaign identifier
         data: Campaign data dictionary
     """
     try:
-        _ensure_storage_dir()
-        file_path = STORAGE_DIR / f"campaign_{campaign_id}.json"
-        with open(file_path, "w") as f:
-            json.dump(data, f, indent=2, default=_json_default)
-        logger.info(f"Saved campaign {campaign_id} to {file_path}")
+        db = SessionLocal()
+        try:
+            campaign_uuid = uuid.UUID(campaign_id)
+        except Exception:
+            campaign_uuid = uuid.uuid4()
+
+        campaign = db.get(Campaign, campaign_uuid)
+        if not campaign:
+            campaign = Campaign(
+                id=campaign_uuid,
+                stripe_session_id=data.get("stripe_session_id") or "",
+                email=data.get("email") or "",
+                status=data.get("status") or "processing",
+                progress_percent=data.get("progress_percent") or 0,
+                completed_at=data.get("completed_at"),
+            )
+            db.add(campaign)
+            db.flush()
+        else:
+            if data.get("stripe_session_id"):
+                campaign.stripe_session_id = data["stripe_session_id"]
+            if data.get("email"):
+                campaign.email = data["email"]
+            if data.get("status"):
+                campaign.status = data["status"]
+            if data.get("progress_percent") is not None:
+                campaign.progress_percent = data["progress_percent"]
+            if data.get("completed_at"):
+                campaign.completed_at = data["completed_at"]
+
+        if "properties" in data:
+            db.query(Property).filter(Property.campaign_id == campaign.id).delete()
+            for idx, prop in enumerate(data.get("properties") or []):
+                address = prop.get("input_address") or prop.get("address_full") or prop.get("address")
+                score = prop.get("property_score") or prop.get("prospect_score")
+                status = prop.get("status") or "completed"
+                error = prop.get("error_message")
+                payload = {
+                    "input_index": idx,
+                    "raw_address": None,
+                    "result": prop,
+                }
+                db.add(
+                    Property(
+                        campaign_id=campaign.id,
+                        address=address,
+                        score=score,
+                        status=status,
+                        error=error,
+                        data=json.dumps(payload),
+                    )
+                )
+
+        db.commit()
+        logger.info(f"Saved campaign {campaign_id} to PostgreSQL")
     except Exception as e:
         logger.error(f"Failed to save campaign {campaign_id}: {e}", exc_info=True)
         raise
+    finally:
+        try:
+            db.close()
+        except Exception:
+            pass
 
 
 def load_campaign(campaign_id: str) -> Optional[Dict[str, Any]]:
     """
-    Load campaign data from disk
+    Load campaign data from PostgreSQL
 
     Args:
         campaign_id: Unique campaign identifier
@@ -130,30 +191,59 @@ def load_campaign(campaign_id: str) -> Optional[Dict[str, Any]]:
         Campaign data dict or None if not found
     """
     try:
-        file_path = STORAGE_DIR / f"campaign_{campaign_id}.json"
-
-        # Debug: List all files in storage directory
-        if STORAGE_DIR.exists():
-            all_files = list(STORAGE_DIR.glob("*.json"))
-            logger.info(
-                f"Storage dir has {len(all_files)} files: {[f.name for f in all_files[:5]]}"
-            )
-        else:
-            logger.warning(f"Storage directory {STORAGE_DIR} does not exist!")
-
-        if not file_path.exists():
-            logger.warning(f"Campaign {campaign_id} not found at {file_path}")
-            logger.warning(f"Looking for: campaign_{campaign_id}.json")
+        db = SessionLocal()
+        campaign_uuid = uuid.UUID(campaign_id)
+        campaign = db.get(Campaign, campaign_uuid)
+        if not campaign:
+            logger.warning(f"Campaign {campaign_id} not found in PostgreSQL")
             return None
 
-        with open(file_path, "r") as f:
-            data = json.load(f)
+        props = (
+            db.execute(select(Property).where(Property.campaign_id == campaign.id))
+            .scalars()
+            .all()
+        )
+        parsed = []
+        for prop in props:
+            try:
+                payload = json.loads(prop.data) if prop.data else {}
+            except Exception:
+                payload = {}
+            parsed.append((payload.get("input_index", 0), payload))
 
-        logger.info(f"Loaded campaign {campaign_id} from {file_path}")
-        return data
+        parsed.sort(key=lambda x: x[0])
+        properties = []
+        for _, payload in parsed:
+            result = payload.get("result")
+            if result is not None:
+                properties.append(result)
+
+        total = len(props)
+        processed = len([p for p in props if p.status in ("completed", "failed")])
+        success_count = len([p for p in props if p.status == "completed"])
+        failed_count = len([p for p in props if p.status == "failed"])
+
+        return {
+            "campaign_id": str(campaign.id),
+            "stripe_session_id": campaign.stripe_session_id,
+            "email": campaign.email,
+            "status": campaign.status,
+            "created_at": campaign.created_at.isoformat() if campaign.created_at else None,
+            "completed_at": campaign.completed_at.isoformat() if campaign.completed_at else None,
+            "total_properties": total,
+            "processed_count": processed,
+            "success_count": success_count,
+            "failed_count": failed_count,
+            "properties": properties,
+        }
     except Exception as e:
         logger.error(f"Failed to load campaign {campaign_id}: {e}", exc_info=True)
         return None
+    finally:
+        try:
+            db.close()
+        except Exception:
+            pass
 
 
 def cleanup_expired_sessions() -> None:

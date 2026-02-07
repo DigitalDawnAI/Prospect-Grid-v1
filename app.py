@@ -10,9 +10,17 @@ import csv
 import io
 import logging
 from datetime import datetime, timedelta
+import json
+import base64
+import hmac
+import hashlib
 import os
 import stripe
-import threading
+from sqlalchemy import select
+from redis import Redis
+from rq import Queue
+from sendgrid import SendGridAPIClient
+from sendgrid.helpers.mail import Mail
 
 from src.models import RawAddress, ScoredProperty, ProcessingStatus
 from src.geocoder import Geocoder
@@ -21,10 +29,10 @@ from src.gemini_scorer import GeminiPropertyScorer
 from src.storage_helper import (
     save_session,
     load_session,
-    save_campaign,
-    load_campaign,
     cleanup_expired_sessions,
 )
+from src.db import SessionLocal, init_db
+from src.db_models import Campaign, Property
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -32,6 +40,9 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 CORS(app)  # Allow frontend to call API
+
+# Initialize DB schema
+init_db()
 
 # Cleanup expired sessions on startup
 cleanup_expired_sessions()
@@ -43,6 +54,147 @@ property_scorer = GeminiPropertyScorer()
 
 # Configure Stripe
 stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
+
+# Redis queue
+_redis_url = os.getenv("REDIS_URL")
+_redis_conn = Redis.from_url(_redis_url) if _redis_url else None
+queue = Queue("default", connection=_redis_conn) if _redis_conn else None
+
+
+def _b64url_encode(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).decode("utf-8").rstrip("=")
+
+
+def _b64url_decode(data: str) -> bytes:
+    padding = "=" * (-len(data) % 4)
+    return base64.urlsafe_b64decode(data + padding)
+
+
+def sign_results_token(campaign_id: str, expires_days: int = 7) -> str:
+    secret = os.getenv("SECRET_KEY", "")
+    if not secret:
+        raise ValueError("SECRET_KEY not configured")
+
+    exp = int((datetime.utcnow() + timedelta(days=expires_days)).timestamp())
+    payload = {"campaign_id": campaign_id, "exp": exp}
+    payload_b64 = _b64url_encode(json.dumps(payload).encode("utf-8"))
+    signature = hmac.new(secret.encode("utf-8"), payload_b64.encode("utf-8"), hashlib.sha256).digest()
+    sig_b64 = _b64url_encode(signature)
+    return f"{payload_b64}.{sig_b64}"
+
+
+def verify_results_token(token: str) -> str:
+    secret = os.getenv("SECRET_KEY", "")
+    if not secret:
+        raise ValueError("SECRET_KEY not configured")
+
+    try:
+        payload_b64, sig_b64 = token.split(".", 1)
+    except ValueError:
+        raise ValueError("Invalid token format")
+
+    expected_sig = hmac.new(secret.encode("utf-8"), payload_b64.encode("utf-8"), hashlib.sha256).digest()
+    if not hmac.compare_digest(_b64url_encode(expected_sig), sig_b64):
+        raise ValueError("Invalid token signature")
+
+    payload = json.loads(_b64url_decode(payload_b64).decode("utf-8"))
+    exp = int(payload.get("exp", 0))
+    if datetime.utcnow().timestamp() > exp:
+        raise ValueError("Token expired")
+
+    campaign_id = payload.get("campaign_id")
+    if not campaign_id:
+        raise ValueError("Invalid token payload")
+
+    return campaign_id
+
+
+def send_results_email(email: str, campaign_id: str) -> None:
+    api_key = os.getenv("SENDGRID_API_KEY")
+    if not api_key:
+        logger.error("SENDGRID_API_KEY not configured; skipping email send")
+        return
+
+    if not email:
+        logger.error("Missing email; skipping email send")
+        return
+
+    token = sign_results_token(campaign_id, expires_days=7)
+    results_link = f"https://www.prospect-grid.com/results/{campaign_id}?token={token}"
+    message = Mail(
+        from_email="results@prospect-grid.com",
+        to_emails=email,
+        subject="Your ProspectGrid Results Are Ready",
+        plain_text_content=f"Your results are ready: {results_link}",
+    )
+    try:
+        sg = SendGridAPIClient(api_key)
+        sg.send(message)
+        logger.info(f"Sent results email for campaign {campaign_id} to {email}")
+    except Exception as e:
+        logger.error(f"Failed to send results email: {e}", exc_info=True)
+
+
+def _load_campaign_payload(campaign_id: str) -> dict | None:
+    db = SessionLocal()
+    try:
+        try:
+            campaign_uuid = uuid.UUID(campaign_id)
+        except Exception:
+            return None
+        campaign = db.get(Campaign, campaign_uuid)
+        if not campaign:
+            return None
+
+        props = (
+            db.execute(select(Property).where(Property.campaign_id == campaign.id))
+            .scalars()
+            .all()
+        )
+        parsed = []
+        for prop in props:
+            try:
+                payload = json.loads(prop.data) if prop.data else {}
+            except Exception:
+                payload = {}
+            parsed.append((payload.get("input_index", 0), prop, payload))
+
+        parsed.sort(key=lambda x: x[0])
+        properties = []
+        for _, prop, payload in parsed:
+            result = payload.get("result")
+            if result is not None:
+                properties.append(result)
+            else:
+                properties.append(
+                    {
+                        "input_address": prop.address,
+                        "status": prop.status,
+                        "error_message": prop.error,
+                    }
+                )
+
+        total = len(props)
+        processed = len([p for p in props if p.status in ("completed", "failed")])
+        success_count = len([p for p in props if p.status == "completed"])
+        failed_count = len([p for p in props if p.status == "failed"])
+
+        return {
+            "campaign_id": str(campaign.id),
+            "stripe_session_id": campaign.stripe_session_id,
+            "email": campaign.email,
+            "status": campaign.status,
+            "created_at": campaign.created_at.isoformat() if campaign.created_at else None,
+            "completed_at": campaign.completed_at.isoformat() if campaign.completed_at else None,
+            "total_properties": total,
+            "processed_count": processed,
+            "success_count": success_count,
+            "failed_count": failed_count,
+            "progress_percent": round((processed / total) * 100, 1) if total else 0.0,
+            "properties": properties,
+        }
+    finally:
+        db.close()
 
 
 @app.route("/health", methods=["GET"])
@@ -273,6 +425,26 @@ def verify_payment(stripe_session_id: str):
                 503,
             )
 
+        db = SessionLocal()
+        existing = (
+            db.execute(select(Campaign).where(Campaign.stripe_session_id == stripe_session_id))
+            .scalars()
+            .first()
+        )
+        if existing:
+            payload = _load_campaign_payload(str(existing.id))
+            total = payload.get("total_properties", 0) if payload else 0
+            return (
+                jsonify(
+                    {
+                        "campaign_id": str(existing.id),
+                        "status": existing.status,
+                        "estimated_time_minutes": total / 20 if total else 0,
+                    }
+                ),
+                200,
+            )
+
         checkout_session = stripe.checkout.Session.retrieve(stripe_session_id)
         if checkout_session.payment_status != "paid":
             return jsonify({"error": "Payment not completed"}), 400
@@ -306,27 +478,41 @@ def verify_payment(stripe_session_id: str):
         )
 
         campaign_id = str(uuid.uuid4())
-        campaign_data = {
-            "campaign_id": campaign_id,
-            "session_id": upload_session_id,
-            "email": email,
-            "service_level": "full_scoring_standard",
-            "street_view_mode": street_view_mode,
-            "payment_intent_id": checkout_session.payment_intent,
-            "stripe_session_id": stripe_session_id,
-            "status": "processing",
-            "created_at": datetime.now().isoformat(),
-            "total_properties": len(session["addresses"]),
-            "processed_count": 0,
-            "success_count": 0,
-            "failed_count": 0,
-            "properties": [],
-        }
-        save_campaign(campaign_id, campaign_data)
+        campaign = Campaign(
+            id=uuid.UUID(campaign_id),
+            stripe_session_id=stripe_session_id,
+            email=email or "",
+            status="processing",
+            progress_percent=0,
+        )
+        db.add(campaign)
+        db.flush()
 
-        thread = threading.Thread(target=process_campaign, args=(campaign_id,), daemon=True)
-        thread.start()
-        logger.info(f"Started background processing thread for campaign {campaign_id}")
+        for idx, raw_addr_dict in enumerate(session["addresses"]):
+            raw_addr = RawAddress(**raw_addr_dict)
+            payload = {
+                "input_index": idx,
+                "raw_address": raw_addr_dict,
+                "result": None,
+            }
+            db.add(
+                Property(
+                    campaign_id=campaign.id,
+                    address=raw_addr.full_address,
+                    score=None,
+                    status="pending",
+                    error=None,
+                    data=json.dumps(payload),
+                )
+            )
+
+        db.commit()
+
+        if not queue:
+            return jsonify({"error": "Queue unavailable"}), 500
+
+        queue.enqueue(process_campaign, campaign_id)
+        logger.info(f"Enqueued background processing job for campaign {campaign_id}")
 
         return (
             jsonify(
@@ -345,6 +531,11 @@ def verify_payment(stripe_session_id: str):
     except Exception as e:
         logger.error(f"Payment verification error: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
+    finally:
+        try:
+            db.close()
+        except Exception:
+            pass
 
 
 @app.route("/api/process/<session_id>", methods=["POST"])
@@ -369,6 +560,26 @@ def start_processing(session_id: str):
 
         if not stripe_session_id:
             return jsonify({"error": "Missing required field: stripe_session_id"}), 400
+
+        db = SessionLocal()
+        existing = (
+            db.execute(select(Campaign).where(Campaign.stripe_session_id == stripe_session_id))
+            .scalars()
+            .first()
+        )
+        if existing:
+            payload = _load_campaign_payload(str(existing.id))
+            total = payload.get("total_properties", 0) if payload else 0
+            return (
+                jsonify(
+                    {
+                        "campaign_id": str(existing.id),
+                        "status": existing.status,
+                        "estimated_time_minutes": total / 20 if total else 0,
+                    }
+                ),
+                200,
+            )
 
         # Retrieve and validate Stripe checkout session
         try:
@@ -413,27 +624,41 @@ def start_processing(session_id: str):
         street_view_mode = "standard"
 
         campaign_id = str(uuid.uuid4())
-        campaign_data = {
-            "campaign_id": campaign_id,
-            "session_id": session_id,
-            "email": email,
-            "service_level": "full_scoring_standard",
-            "street_view_mode": street_view_mode,
-            "payment_intent_id": checkout_session.payment_intent,
-            "stripe_session_id": stripe_session_id,
-            "status": "processing",
-            "created_at": datetime.now().isoformat(),
-            "total_properties": len(session["addresses"]),
-            "processed_count": 0,
-            "success_count": 0,
-            "failed_count": 0,
-            "properties": [],
-        }
-        save_campaign(campaign_id, campaign_data)
+        campaign = Campaign(
+            id=uuid.UUID(campaign_id),
+            stripe_session_id=stripe_session_id,
+            email=email or "",
+            status="processing",
+            progress_percent=0,
+        )
+        db.add(campaign)
+        db.flush()
 
-        thread = threading.Thread(target=process_campaign, args=(campaign_id,), daemon=True)
-        thread.start()
-        logger.info(f"Started background processing thread for campaign {campaign_id}")
+        for idx, raw_addr_dict in enumerate(session["addresses"]):
+            raw_addr = RawAddress(**raw_addr_dict)
+            payload = {
+                "input_index": idx,
+                "raw_address": raw_addr_dict,
+                "result": None,
+            }
+            db.add(
+                Property(
+                    campaign_id=campaign.id,
+                    address=raw_addr.full_address,
+                    score=None,
+                    status="pending",
+                    error=None,
+                    data=json.dumps(payload),
+                )
+            )
+
+        db.commit()
+
+        if not queue:
+            return jsonify({"error": "Queue unavailable"}), 500
+
+        queue.enqueue(process_campaign, campaign_id)
+        logger.info(f"Enqueued background processing job for campaign {campaign_id}")
 
         return (
             jsonify(
@@ -452,6 +677,11 @@ def start_processing(session_id: str):
     except Exception as e:
         logger.error(f"Processing start error: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
+    finally:
+        try:
+            db.close()
+        except Exception:
+            pass
 
 
 def _score_placeholder(reason: str = "scoring_failed") -> dict:
@@ -478,111 +708,151 @@ def process_campaign(campaign_id: str):
     NOTE: /tmp storage is ephemeral and threads are not durable on Railway;
     this is best moved to a real worker + persistent DB.
     """
-    campaign = load_campaign(campaign_id)
-    if not campaign:
-        logger.error(f"Campaign {campaign_id} not found")
-        return
+    db = SessionLocal()
+    try:
+        campaign_uuid = uuid.UUID(campaign_id)
+        campaign = db.get(Campaign, campaign_uuid)
+        if not campaign:
+            logger.error(f"Campaign {campaign_id} not found")
+            return
 
-    session = load_session(campaign["session_id"])
-    if not session:
-        logger.error(f"Session {campaign['session_id']} not found")
-        return
+        if campaign.status == "completed":
+            return
 
-    # Hardcoded settings for full_scoring_standard (only supported tier)
-    multi_angle = False
-    needs_scoring = True
+        props = (
+            db.execute(select(Property).where(Property.campaign_id == campaign.id))
+            .scalars()
+            .all()
+        )
+        parsed = []
+        for prop in props:
+            try:
+                payload = json.loads(prop.data) if prop.data else {}
+            except Exception:
+                payload = {}
+            parsed.append((payload.get("input_index", 0), prop, payload))
 
-    for raw_addr_dict in session["addresses"]:
-        try:
-            raw_addr = RawAddress(**raw_addr_dict)
+        parsed.sort(key=lambda x: x[0])
+        total = len(parsed)
+        processed = len([p for p in props if p.status in ("completed", "failed")])
 
-            # Step 1: Geocode
-            geocoded = geocoder.geocode(raw_addr)
-            if not geocoded:
-                campaign["failed_count"] += 1
-                campaign["processed_count"] += 1
-                campaign["properties"].append(
-                    {
+        # Hardcoded settings for full_scoring_standard (only supported tier)
+        multi_angle = False
+        needs_scoring = True
+
+        for _, prop_row, payload in parsed:
+            if prop_row.status in ("completed", "failed"):
+                continue
+            raw_addr_dict = payload.get("raw_address") or {}
+            try:
+                raw_addr = RawAddress(**raw_addr_dict)
+
+                # Step 1: Geocode
+                geocoded = geocoder.geocode(raw_addr)
+                if not geocoded:
+                    result = {
                         "input_address": raw_addr.full_address,
                         "status": "failed",
                         "error_message": "Geocoding failed",
                     }
+                    prop_row.status = "failed"
+                    prop_row.error = "Geocoding failed"
+                    prop_row.data = json.dumps(
+                        {
+                            "input_index": payload.get("input_index", 0),
+                            "raw_address": raw_addr_dict,
+                            "result": result,
+                        }
+                    )
+                    processed += 1
+                    campaign.progress_percent = round((processed / total) * 100, 1) if total else 0
+                    db.commit()
+                    continue
+
+                prop = ScoredProperty.from_geocoded(geocoded, campaign_id)
+
+                # Step 2: Street View (single angle)
+                street_view = streetview_fetcher.fetch(geocoded, multi_angle=multi_angle)
+                if street_view:
+                    prop.add_street_view(street_view)
+                else:
+                    prop.processing_status = ProcessingStatus.NO_IMAGERY
+
+                # Step 3: AI scoring (always enabled for full_scoring_standard)
+                if needs_scoring and street_view and street_view.image_available:
+                    score = property_scorer.score(street_view)
+                    if score:
+                        prop.add_score(score)
+
+                dumped = prop.model_dump()
+                has_any_score = (
+                    dumped.get("property_score") is not None
+                    or dumped.get("prospect_score") is not None
                 )
-                save_campaign(campaign_id, campaign)
-                continue
+                prop_row.status = "completed" if has_any_score else "failed"
+                prop_row.score = dumped.get("property_score") or dumped.get("prospect_score")
+                prop_row.error = None if has_any_score else "Scoring failed"
+                prop_row.data = json.dumps(
+                    {
+                        "input_index": payload.get("input_index", 0),
+                        "raw_address": raw_addr_dict,
+                        "result": dumped,
+                    }
+                )
+                processed += 1
+                campaign.progress_percent = round((processed / total) * 100, 1) if total else 0
+                db.commit()
 
-            prop = ScoredProperty.from_geocoded(geocoded, campaign_id)
-
-            # Step 2: Street View (single angle)
-            street_view = streetview_fetcher.fetch(geocoded, multi_angle=multi_angle)
-            if street_view:
-                prop.add_street_view(street_view)
-            else:
-                prop.processing_status = ProcessingStatus.NO_IMAGERY
-
-            # Step 3: AI scoring (always enabled for full_scoring_standard)
-            if needs_scoring and street_view and street_view.image_available:
-                score = property_scorer.score(street_view)
-                if score:
-                    prop.add_score(score)
-
-            # Persist property
-            dumped = prop.model_dump()
-
-            campaign["properties"].append(dumped)
-            campaign["processed_count"] += 1
-
-            # Count success/failure based on scoring result (new/legacy fields)
-            has_any_score = dumped.get("property_score") is not None or dumped.get("prospect_score") is not None
-            if has_any_score:
-                campaign["success_count"] += 1
-            else:
-                campaign["failed_count"] += 1
-
-            save_campaign(campaign_id, campaign)
-
-        except Exception as e:
-            logger.error(f"Error processing address: {e}", exc_info=True)
-            campaign["failed_count"] += 1
-            campaign["processed_count"] += 1
-            campaign["properties"].append(
-                {
+            except Exception as e:
+                logger.error(f"Error processing address: {e}", exc_info=True)
+                result = {
                     "input_address": raw_addr_dict.get("address")
                     if isinstance(raw_addr_dict, dict)
                     else str(raw_addr_dict),
                     "status": "failed",
                     "error_message": str(e),
                 }
-            )
-            save_campaign(campaign_id, campaign)
-            continue
+                prop_row.status = "failed"
+                prop_row.error = str(e)
+                prop_row.data = json.dumps(
+                    {
+                        "input_index": payload.get("input_index", 0),
+                        "raw_address": raw_addr_dict,
+                        "result": result,
+                    }
+                )
+                processed += 1
+                campaign.progress_percent = round((processed / total) * 100, 1) if total else 0
+                db.commit()
+                continue
 
-    campaign["status"] = "completed"
-    campaign["completed_at"] = datetime.now().isoformat()
-    save_campaign(campaign_id, campaign)
+        campaign.status = "completed"
+        campaign.completed_at = datetime.utcnow()
+        campaign.progress_percent = 100
+        db.commit()
+
+        send_results_email(campaign.email, str(campaign.id))
+    finally:
+        db.close()
 
 
 @app.route("/api/status/<campaign_id>", methods=["GET"])
 def get_status(campaign_id: str):
     try:
-        campaign = load_campaign(campaign_id)
+        campaign = _load_campaign_payload(campaign_id)
         if not campaign:
             return jsonify({"error": "Campaign not found"}), 404
-
-        total = campaign.get("total_properties") or 0
-        processed = campaign.get("processed_count") or 0
-        progress = round((processed / total) * 100, 1) if total else 0.0
 
         return (
             jsonify(
                 {
                     "campaign_id": campaign_id,
                     "status": campaign["status"],
-                    "total_properties": total,
-                    "processed_count": processed,
+                    "total_properties": campaign.get("total_properties") or 0,
+                    "processed_count": campaign.get("processed_count") or 0,
                     "success_count": campaign.get("success_count", 0),
                     "failed_count": campaign.get("failed_count", 0),
-                    "progress_percent": progress,
+                    "progress_percent": campaign.get("progress_percent", 0),
                 }
             ),
             200,
@@ -596,7 +866,7 @@ def get_status(campaign_id: str):
 @app.route("/api/results/<campaign_id>", methods=["GET"])
 def get_results(campaign_id: str):
     try:
-        campaign = load_campaign(campaign_id)
+        campaign = _load_campaign_payload(campaign_id)
         if not campaign:
             return jsonify({"error": "Campaign not found"}), 404
 
@@ -619,10 +889,22 @@ def get_results(campaign_id: str):
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/validate-results-token", methods=["GET"])
+def validate_results_token():
+    try:
+        token = request.args.get("token")
+        if not token:
+            return jsonify({"error": "Missing token"}), 400
+        campaign_id = verify_results_token(token)
+        return jsonify({"campaign_id": campaign_id}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+
 @app.route("/api/property/<campaign_id>/<int:property_index>", methods=["GET"])
 def get_property(campaign_id: str, property_index: int):
     try:
-        campaign = load_campaign(campaign_id)
+        campaign = _load_campaign_payload(campaign_id)
         if not campaign:
             return jsonify({"error": "Campaign not found"}), 404
 
