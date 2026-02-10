@@ -1,7 +1,7 @@
 import os
 
 from redis import Redis
-from rq import Worker, Queue, Connection
+from rq import Worker, Queue
 
 import app  # noqa: F401
 
@@ -12,9 +12,8 @@ def main() -> None:
         raise RuntimeError("REDIS_URL not configured")
 
     conn = Redis.from_url(redis_url)
-    with Connection(conn):
-        worker = Worker([Queue("default")])
-        worker.work()
+    queue = Queue("default", connection=conn)
+    Worker([queue], connection=conn).work()
 
 
 if __name__ == "__main__":
