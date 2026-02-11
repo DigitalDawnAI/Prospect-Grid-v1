@@ -19,8 +19,7 @@ import stripe
 from sqlalchemy import select
 from redis import Redis
 from rq import Queue
-from sendgrid import SendGridAPIClient
-from sendgrid.helpers.mail import Mail
+import resend
 
 from src.models import RawAddress, ScoredProperty, ProcessingStatus
 from src.geocoder import Geocoder
@@ -110,26 +109,25 @@ def verify_results_token(token: str) -> str:
 
 
 def send_results_email(email: str, campaign_id: str) -> None:
-    api_key = os.getenv("SENDGRID_API_KEY")
+    api_key = os.getenv("RESEND_API_KEY")
     if not api_key:
-        logger.error("SENDGRID_API_KEY not configured; skipping email send")
+        logger.error("RESEND_API_KEY not configured; skipping email send")
         return
 
     if not email:
         logger.error("Missing email; skipping email send")
         return
 
+    resend.api_key = api_key
     token = sign_results_token(campaign_id, expires_days=7)
     results_link = f"https://www.prospect-grid.com/results/{campaign_id}?token={token}"
-    message = Mail(
-        from_email="results@prospect-grid.com",
-        to_emails=email,
-        subject="Your ProspectGrid Results Are Ready",
-        plain_text_content=f"Your results are ready: {results_link}",
-    )
     try:
-        sg = SendGridAPIClient(api_key)
-        sg.send(message)
+        resend.Emails.send({
+            "from": "ProspectGrid <results@prospect-grid.com>",
+            "to": [email],
+            "subject": "Your ProspectGrid Results Are Ready",
+            "text": f"Your results are ready: {results_link}",
+        })
         logger.info(f"Sent results email for campaign {campaign_id} to {email}")
     except Exception as e:
         logger.error(f"Failed to send results email: {e}", exc_info=True)
