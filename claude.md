@@ -9,6 +9,98 @@ ProspectGrid is a Flask-based REST API that processes real estate addresses thro
 
 ---
 
+## Session: February 10, 2026 - Email Notifications & SendGrid → Resend Migration
+
+### Context
+Prior session added durable persistence (PostgreSQL), background worker queue (Redis + RQ), and email notification support. The worker service was deployed on Railway but missing environment variables. This session focused on getting email delivery working end-to-end.
+
+### Problem: Worker Missing Environment Variables
+- Railway worker service is a **separate service** from the web service
+- It does NOT inherit environment variables from web — each service needs its own
+- Worker was failing on geocoding because `GOOGLE_MAPS_API_KEY` was missing
+- Email sending was not configured yet
+
+### Resolution: Railway Worker Environment Variables
+Added to the **worker** service in Railway (copied from web):
+- `GOOGLE_MAPS_API_KEY` — geocoding + Street View
+- `GOOGLE_API_KEY` — Gemini AI scoring
+- `SECRET_KEY` — signing email result links (generated fresh: `python3 -c "import secrets; print(secrets.token_urlsafe(32))"`)
+- `RESEND_API_KEY` — email delivery (see below)
+
+### Problem: SendGrid Account Locked Out
+- Created SendGrid account and verified `prospect-grid.com` domain
+- SendGrid immediately locked the account: "You are not authorized to access this account"
+- Twilio (owns SendGrid) console only provides Twilio API keys (`SK`/`ac` prefix), not SendGrid keys (`SG.` prefix)
+- **SendGrid keys start with `SG.`** — anything else won't work with their Python library
+- Twilio API keys are NOT interchangeable with SendGrid API keys
+
+### The Fix: Switched to Resend
+
+**Why Resend:**
+- Simple API, generous free tier (100 emails/day)
+- Easy domain verification
+- Python SDK is minimal and clean
+- No account lockout issues
+
+**Code Changes:**
+
+`app.py` (lines 22-23, 112-135):
+- Removed: `from sendgrid import SendGridAPIClient` + `from sendgrid.helpers.mail import Mail`
+- Added: `import resend`
+- `send_results_email()` now uses `resend.Emails.send()` instead of `SendGridAPIClient`
+- Environment variable changed: `SENDGRID_API_KEY` → `RESEND_API_KEY`
+- From address: `ProspectGrid <results@prospect-grid.com>`
+
+`requirements.txt`:
+- Removed: `sendgrid>=6.10.0`
+- Added: `resend>=2.0.0`
+
+**Git Commit**: `0c51c92` - "Switch email provider from SendGrid to Resend"
+
+### Resend Setup
+1. Sign up at https://resend.com
+2. Create API key (starts with `re_`) — full access permissions
+3. Add domain `prospect-grid.com` — add DNS records in Cloudflare
+4. Set `RESEND_API_KEY` in both web and worker services on Railway
+
+### Railway Environment Variables (Current State)
+
+**Both web AND worker services need:**
+| Variable | Purpose | Status |
+|----------|---------|--------|
+| `GOOGLE_MAPS_API_KEY` | Geocoding + Street View | ✅ Both services |
+| `GOOGLE_API_KEY` | Gemini AI scoring | ✅ Both services |
+| `RESEND_API_KEY` | Email delivery (Resend) | ✅ Both services |
+| `SECRET_KEY` | Signing email result links | ✅ Both services |
+| `STRIPE_SECRET_KEY` | Payment processing | ✅ Web service |
+| `STRIPE_WEBHOOK_SECRET` | Stripe webhooks | ✅ Web service |
+| `DATABASE_URL` | PostgreSQL connection | ✅ Both services (from Railway Postgres plugin) |
+| `REDIS_URL` | Job queue connection | ✅ Both services (from Railway Redis plugin) |
+| `MAINTENANCE_MODE` | Lock down site if `true` | Optional |
+
+### Troubleshooting: If Emails Break
+1. Check Railway worker logs for `RESEND_API_KEY not configured` — means the env var is missing
+2. Check for Resend errors — domain may not be verified (DNS propagation)
+3. Resend dashboard (https://resend.com) shows delivery logs and failures
+4. The `from` address must match a verified domain in Resend: `results@prospect-grid.com`
+5. If Resend key starts with anything other than `re_`, it's the wrong key
+
+### Troubleshooting: If Worker Isn't Processing
+1. Check worker logs in Railway for errors
+2. Verify all 4 env vars are set on the **worker** service (not just web)
+3. Worker and web are SEPARATE services — adding a var to one does NOT add it to the other
+4. Redis must be running and `REDIS_URL` must be set on both services
+
+### Recent Commits (This Period)
+- `96eda77` - Add durable persistence, worker queue, and email notifications
+- `7b67933` - Fix rq Connection import removed in newer versions
+- `0c51c92` - Switch email provider from SendGrid to Resend
+
+### Testing Status
+- ⏳ Email delivery — awaiting user test results
+
+---
+
 ## Session: January 7, 2026 - 🎉 FIXED: Session Expiration Issue
 
 ### Problem
@@ -307,18 +399,27 @@ GET /api/results/{campaign_id}
 
 ## Environment Variables
 
-### Required
+### Required (both web + worker services)
 ```bash
-GOOGLE_MAPS_API_KEY=<your_google_maps_key>
-ANTHROPIC_API_KEY=<your_anthropic_key>
-FLASK_ENV=development|production
-PORT=5001
+GOOGLE_MAPS_API_KEY=<your_google_maps_key>    # Geocoding + Street View
+GOOGLE_API_KEY=<your_google_api_key>          # Gemini AI scoring
+RESEND_API_KEY=<your_resend_key>              # Email delivery (starts with re_)
+SECRET_KEY=<random_secret>                     # Signing email links
+DATABASE_URL=<postgresql_url>                  # PostgreSQL (from Railway plugin)
+REDIS_URL=<redis_url>                          # Job queue (from Railway plugin)
 ```
 
-### Optional (for future payment integration)
+### Required (web service only)
 ```bash
 STRIPE_SECRET_KEY=<your_stripe_secret_key>
 STRIPE_WEBHOOK_SECRET=<your_stripe_webhook_secret>
+```
+
+### Optional
+```bash
+MAINTENANCE_MODE=true|false                    # Lock down site when true
+FLASK_ENV=development|production
+PORT=5001
 ```
 
 ---
@@ -422,11 +523,8 @@ curl -X POST -F "file=@test.csv" \
 ### API Usage Costs (per address)
 - **Geocoding**: $0.005 (Google Maps)
 - **Street View**: $0.007 (Google Street View)
-- **AI Scoring**: $0.025 (Anthropic Claude)
-
-### Pricing (50% markup)
-- **Street View Only**: $0.018/address
-- **Full Scoring**: $0.056/address
+- **AI Scoring**: ~$0.000075 (Google Gemini 2.5 Flash — essentially free within daily limits)
+- **Email**: Free tier (Resend, 100 emails/day)
 
 ---
 
@@ -434,12 +532,17 @@ curl -X POST -F "file=@test.csv" \
 
 - **Framework**: Flask 3.0.0
 - **Web Server**: Gunicorn 21.2.0
+- **Database**: PostgreSQL (Railway plugin)
+- **Job Queue**: Redis + RQ (Railway plugin)
+- **Email**: Resend (replaced SendGrid Feb 2026)
+- **Payments**: Stripe
 - **APIs**:
   - Google Maps Geocoding API
   - Google Street View Static API
-  - Anthropic Claude API
+  - Google Gemini 2.5 Flash (AI scoring)
 - **Data Validation**: Pydantic 2.10+
-- **Deployment**: Railway
+- **Deployment**: Railway (backend + worker) / Vercel (frontend)
+- **DNS**: Cloudflare
 - **Repository**: GitHub
 
 ---
@@ -447,10 +550,10 @@ curl -X POST -F "file=@test.csv" \
 ## Next Steps
 
 ### MVP Completion
-- [ ] Add PostgreSQL database (replace in-memory storage)
-- [ ] Implement background job processing (Celery/RQ)
-- [ ] Add Stripe payment webhook handler
-- [ ] Add email notifications (SendGrid)
+- [x] Add PostgreSQL database (replace in-memory storage) — commit `96eda77`
+- [x] Implement background job processing (Redis + RQ) — commit `96eda77`
+- [x] Add Stripe payment webhook handler
+- [x] Add email notifications (Resend, replaced SendGrid) — commit `0c51c92`
 - [ ] Implement CSV export endpoint
 
 ### Production Readiness
@@ -476,9 +579,12 @@ curl -X POST -F "file=@test.csv" \
 - ✅ All API keys are stored in Railway environment variables
 - ✅ Gunicorn configured for production via Procfile
 - ✅ CORS enabled for frontend integration
-- ⚠️  Currently uses in-memory storage (data lost on restart)
-- ⚠️  Processing is synchronous (will timeout on large batches)
-- ⚠️  No authentication implemented yet (public API)
+- ✅ PostgreSQL for durable persistence (replaced in-memory storage)
+- ✅ Redis + RQ for async background processing (replaced synchronous)
+- ✅ Email notifications via Resend (replaced SendGrid)
+- ✅ Stripe payment integration
+- ⚠️  Railway worker service needs its own env vars (doesn't inherit from web)
+- ⚠️  No authentication implemented yet (public API, protected by Stripe paywall)
 
 ---
 
@@ -838,8 +944,11 @@ street,city,state,zip
 
 **API Keys Required:**
 - ✅ `GOOGLE_MAPS_API_KEY` - Geocoding + Street View
-- ✅ `GOOGLE_API_KEY` - Gemini 2.0 Flash vision
-- ✅ `ANTHROPIC_API_KEY` - Legacy (not currently used)
+- ✅ `GOOGLE_API_KEY` - Gemini 2.5 Flash vision
+- ✅ `RESEND_API_KEY` - Email delivery (starts with `re_`)
+- ✅ `SECRET_KEY` - Signing email result links
+- ✅ `STRIPE_SECRET_KEY` - Payment processing
+- ⚠️ `ANTHROPIC_API_KEY` - Legacy (not currently used)
 
 ### Ready to Resume
 
@@ -899,5 +1008,5 @@ MAINTENANCE_MODE=false
 
 ---
 
-**Last Updated**: December 31, 2025
-**Status**: ✅ Deployed with maintenance mode | ⚠️ Enable MAINTENANCE_MODE=true in Railway to lock down site
+**Last Updated**: February 10, 2026
+**Status**: ✅ Deployed — PostgreSQL, Redis+RQ worker, Stripe payments, Resend email all live
