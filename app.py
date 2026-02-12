@@ -782,7 +782,7 @@ def process_campaign(campaign_id: str):
                     if score:
                         prop.add_score(score)
 
-                dumped = prop.model_dump()
+                dumped = prop.model_dump(mode="json")
                 has_any_score = (
                     dumped.get("property_score") is not None
                     or dumped.get("prospect_score") is not None
