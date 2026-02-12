@@ -12,6 +12,11 @@ from pathlib import Path
 import google.generativeai as genai
 from dotenv import load_dotenv
 
+try:
+    from redis import Redis as _Redis
+except ImportError:
+    _Redis = None
+
 from .models import PropertyScore, StreetViewImage
 
 load_dotenv()
@@ -29,7 +34,7 @@ class GeminiPropertyScorer:
         self,
         api_key: Optional[str] = None,
         model: str = "gemini-2.5-flash",
-        min_delay_s: float = 1.0,
+        min_delay_s: float = None,
         max_retries: int = 6,
         backoff_base_s: float = 1.0,
         backoff_cap_s: float = 30.0,
@@ -43,7 +48,8 @@ class GeminiPropertyScorer:
         Args:
             api_key: Gemini API key. Do NOT fall back to Google Maps key.
             model: Gemini model name.
-            min_delay_s: Minimum spacing between Gemini calls (global, per process).
+            min_delay_s: Minimum spacing between Gemini calls. If None,
+                auto-computed from GEMINI_RPM env var (default 15 RPM).
             max_retries: Retries on rate limit / transient errors.
             backoff_base_s: Base for exponential backoff.
             backoff_cap_s: Max sleep between retries.
@@ -53,10 +59,16 @@ class GeminiPropertyScorer:
         self._model = None  # Lazy initialization
         self._configured = False
 
-        self.min_delay_s = float(min_delay_s)
+        # Compute delay from RPM if not explicitly set
+        if min_delay_s is not None:
+            self.min_delay_s = float(min_delay_s)
+        else:
+            rpm = int(os.getenv("GEMINI_RPM", "15"))
+            self.min_delay_s = 60.0 / rpm
         self.max_retries = int(max_retries)
         self.backoff_base_s = float(backoff_base_s)
         self.backoff_cap_s = float(backoff_cap_s)
+        self._redis = None  # Lazy-init for distributed throttle
 
         # Load scoring prompt
         prompt_path = Path(__file__).parent.parent / "prompts" / "scoring_v1.txt"
@@ -196,9 +208,46 @@ Scoring: 100 = severe distress, 0 = excellent condition.
                 time.sleep(sleep_s)
 
     def _sleep_for_min_delay(self) -> None:
+        """Global throttle — uses Redis when available so multiple workers coordinate."""
         if self.min_delay_s <= 0:
             return
 
+        r = self._get_redis()
+        if r is not None:
+            self._redis_throttle(r)
+        else:
+            self._local_throttle()
+
+    def _get_redis(self):
+        """Lazy-init a Redis connection for distributed throttling."""
+        if self._redis is None and _Redis is not None:
+            url = os.getenv("REDIS_URL")
+            if url:
+                try:
+                    self._redis = _Redis.from_url(url)
+                    self._redis.ping()
+                except Exception:
+                    self._redis = False  # Mark permanently unavailable
+            else:
+                self._redis = False
+        return self._redis if self._redis is not False else None
+
+    def _redis_throttle(self, r) -> None:
+        """Distributed throttle: only one Gemini call across all workers per min_delay_s."""
+        key = "gemini:call_throttle"
+        delay_ms = int(self.min_delay_s * 1000)
+
+        while True:
+            if r.set(key, "1", nx=True, px=delay_ms):
+                return  # Slot acquired
+            ttl_ms = r.pttl(key)
+            if ttl_ms > 0:
+                time.sleep(ttl_ms / 1000.0 + 0.05)
+            else:
+                time.sleep(0.01)
+
+    def _local_throttle(self) -> None:
+        """Fallback per-process throttle when Redis is unavailable."""
         with GeminiPropertyScorer._lock:
             now = time.monotonic()
             elapsed = now - GeminiPropertyScorer._last_call_ts

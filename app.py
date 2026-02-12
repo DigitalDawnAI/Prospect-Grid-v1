@@ -15,6 +15,7 @@ import base64
 import hmac
 import hashlib
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import stripe
 from sqlalchemy import select
 from redis import Redis
@@ -699,12 +700,95 @@ def _score_placeholder(reason: str = "scoring_failed") -> dict:
     }
 
 
+PROCESSING_WORKERS = int(os.getenv("PROCESSING_WORKERS", "10"))
+
+
+def _process_single_property(campaign_id, raw_addr_dict, input_index):
+    """
+    Process one property through the full pipeline (geocode → street view → score).
+    Thread-safe: does not touch the DB. Returns a result dict for the caller.
+    """
+    try:
+        raw_addr = RawAddress(**raw_addr_dict)
+
+        # Step 1: Geocode
+        geocoded = geocoder.geocode(raw_addr)
+        if not geocoded:
+            return {
+                "status": "failed",
+                "error": "Geocoding failed",
+                "score": None,
+                "data": {
+                    "input_index": input_index,
+                    "raw_address": raw_addr_dict,
+                    "result": {
+                        "input_address": raw_addr.full_address,
+                        "status": "failed",
+                        "error_message": "Geocoding failed",
+                    },
+                },
+            }
+
+        prop = ScoredProperty.from_geocoded(geocoded, campaign_id)
+
+        # Step 2: Street View (single angle)
+        street_view = streetview_fetcher.fetch(geocoded, multi_angle=False)
+        if street_view:
+            prop.add_street_view(street_view)
+        else:
+            prop.processing_status = ProcessingStatus.NO_IMAGERY
+
+        # Step 3: AI scoring
+        if street_view and street_view.image_available:
+            score = property_scorer.score(street_view)
+            if score:
+                prop.add_score(score)
+
+        dumped = prop.model_dump(mode="json")
+        has_score = (
+            dumped.get("property_score") is not None
+            or dumped.get("prospect_score") is not None
+        )
+
+        return {
+            "status": "completed" if has_score else "failed",
+            "error": None if has_score else "Scoring failed",
+            "score": dumped.get("property_score") or dumped.get("prospect_score"),
+            "data": {
+                "input_index": input_index,
+                "raw_address": raw_addr_dict,
+                "result": dumped,
+            },
+        }
+
+    except Exception as e:
+        logger.error(f"Error processing property: {e}", exc_info=True)
+        input_address = (
+            raw_addr_dict.get("address")
+            if isinstance(raw_addr_dict, dict)
+            else str(raw_addr_dict)
+        )
+        return {
+            "status": "failed",
+            "error": str(e),
+            "score": None,
+            "data": {
+                "input_index": input_index,
+                "raw_address": raw_addr_dict,
+                "result": {
+                    "input_address": input_address,
+                    "status": "failed",
+                    "error_message": str(e),
+                },
+            },
+        }
+
+
 def process_campaign(campaign_id: str):
     """
     Process all addresses in a campaign using full_scoring_standard tier.
-    Only single-angle Street View with AI scoring is supported.
-    NOTE: /tmp storage is ephemeral and threads are not durable on Railway;
-    this is best moved to a real worker + persistent DB.
+    Uses ThreadPoolExecutor for parallel processing — multiple properties
+    geocode/fetch in parallel while Gemini calls are globally rate-limited via Redis.
     """
     db = SessionLocal()
     try:
@@ -734,95 +818,63 @@ def process_campaign(campaign_id: str):
         total = len(parsed)
         processed = len([p for p in props if p.status in ("completed", "failed")])
 
-        # Hardcoded settings for full_scoring_standard (only supported tier)
-        multi_angle = False
-        needs_scoring = True
-
+        # Collect pending work
+        pending = []
         for _, prop_row, payload in parsed:
             if prop_row.status in ("completed", "failed"):
                 continue
             raw_addr_dict = payload.get("raw_address") or {}
-            try:
-                raw_addr = RawAddress(**raw_addr_dict)
+            input_index = payload.get("input_index", 0)
+            pending.append((prop_row, raw_addr_dict, input_index))
 
-                # Step 1: Geocode
-                geocoded = geocoder.geocode(raw_addr)
-                if not geocoded:
+        logger.info(
+            f"Campaign {campaign_id}: {len(pending)} properties to process "
+            f"with {PROCESSING_WORKERS} workers"
+        )
+
+        # Process properties in parallel
+        with ThreadPoolExecutor(max_workers=PROCESSING_WORKERS) as executor:
+            futures = {}
+            for prop_row, raw_addr_dict, input_index in pending:
+                future = executor.submit(
+                    _process_single_property,
+                    campaign_id,
+                    raw_addr_dict,
+                    input_index,
+                )
+                futures[future] = prop_row
+
+            for future in as_completed(futures):
+                prop_row = futures[future]
+                try:
+                    result = future.result()
+                except Exception as e:
+                    logger.error(f"Unexpected worker error: {e}", exc_info=True)
                     result = {
-                        "input_address": raw_addr.full_address,
                         "status": "failed",
-                        "error_message": "Geocoding failed",
+                        "error": str(e),
+                        "score": None,
+                        "data": {
+                            "input_index": 0,
+                            "raw_address": {},
+                            "result": {
+                                "input_address": "unknown",
+                                "status": "failed",
+                                "error_message": str(e),
+                            },
+                        },
                     }
-                    prop_row.status = "failed"
-                    prop_row.error = "Geocoding failed"
-                    prop_row.data = json.dumps(
-                        {
-                            "input_index": payload.get("input_index", 0),
-                            "raw_address": raw_addr_dict,
-                            "result": result,
-                        }
-                    )
-                    processed += 1
-                    campaign.progress_percent = round((processed / total) * 100, 1) if total else 0
-                    db.commit()
-                    continue
 
-                prop = ScoredProperty.from_geocoded(geocoded, campaign_id)
+                prop_row.status = result["status"]
+                prop_row.error = result.get("error")
+                prop_row.score = result.get("score")
+                prop_row.data = json.dumps(result["data"])
 
-                # Step 2: Street View (single angle)
-                street_view = streetview_fetcher.fetch(geocoded, multi_angle=multi_angle)
-                if street_view:
-                    prop.add_street_view(street_view)
-                else:
-                    prop.processing_status = ProcessingStatus.NO_IMAGERY
-
-                # Step 3: AI scoring (always enabled for full_scoring_standard)
-                if needs_scoring and street_view and street_view.image_available:
-                    score = property_scorer.score(street_view)
-                    if score:
-                        prop.add_score(score)
-
-                dumped = prop.model_dump(mode="json")
-                has_any_score = (
-                    dumped.get("property_score") is not None
-                    or dumped.get("prospect_score") is not None
-                )
-                prop_row.status = "completed" if has_any_score else "failed"
-                prop_row.score = dumped.get("property_score") or dumped.get("prospect_score")
-                prop_row.error = None if has_any_score else "Scoring failed"
-                prop_row.data = json.dumps(
-                    {
-                        "input_index": payload.get("input_index", 0),
-                        "raw_address": raw_addr_dict,
-                        "result": dumped,
-                    }
-                )
                 processed += 1
-                campaign.progress_percent = round((processed / total) * 100, 1) if total else 0
-                db.commit()
-
-            except Exception as e:
-                logger.error(f"Error processing address: {e}", exc_info=True)
-                result = {
-                    "input_address": raw_addr_dict.get("address")
-                    if isinstance(raw_addr_dict, dict)
-                    else str(raw_addr_dict),
-                    "status": "failed",
-                    "error_message": str(e),
-                }
-                prop_row.status = "failed"
-                prop_row.error = str(e)
-                prop_row.data = json.dumps(
-                    {
-                        "input_index": payload.get("input_index", 0),
-                        "raw_address": raw_addr_dict,
-                        "result": result,
-                    }
+                campaign.progress_percent = (
+                    round((processed / total) * 100, 1) if total else 0
                 )
-                processed += 1
-                campaign.progress_percent = round((processed / total) * 100, 1) if total else 0
                 db.commit()
-                continue
 
         campaign.status = "completed"
         campaign.completed_at = datetime.utcnow()
