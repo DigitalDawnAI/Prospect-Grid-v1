@@ -9,7 +9,7 @@ ProspectGrid is a Flask-based REST API that processes real estate addresses thro
 
 ---
 
-## Session: February 10, 2026 - Email Notifications & SendGrid → Resend Migration
+## Session: February 10-11, 2026 - Email Notifications, SendGrid → Resend, Full Pipeline Working
 
 ### Context
 Prior session added durable persistence (PostgreSQL), background worker queue (Redis + RQ), and email notification support. The worker service was deployed on Railway but missing environment variables. This session focused on getting email delivery working end-to-end.
@@ -69,7 +69,8 @@ Added to the **worker** service in Railway (copied from web):
 | Variable | Purpose | Status |
 |----------|---------|--------|
 | `GOOGLE_MAPS_API_KEY` | Geocoding + Street View | ✅ Both services |
-| `GOOGLE_API_KEY` | Gemini AI scoring | ✅ Both services |
+| `GOOGLE_API_KEY` | Gemini AI scoring (legacy name, kept for compatibility) | ✅ Both services |
+| `GEMINI_API_KEY` | Gemini AI scoring (this is what the code actually reads) | ✅ Both services |
 | `RESEND_API_KEY` | Email delivery (Resend) | ✅ Both services |
 | `SECRET_KEY` | Signing email result links | ✅ Both services |
 | `STRIPE_SECRET_KEY` | Payment processing | ✅ Web service |
@@ -91,13 +92,39 @@ Added to the **worker** service in Railway (copied from web):
 3. Worker and web are SEPARATE services — adding a var to one does NOT add it to the other
 4. Redis must be running and `REDIS_URL` must be set on both services
 
+### Bug Fix: datetime Serialization Error (Feb 11)
+
+**Symptom:** All properties showed as "failed" in results despite geocoding, street view, and Gemini scoring all succeeding in the worker logs.
+
+**Root Cause:** `app.py:785` — `prop.model_dump()` returns Python `datetime` objects. When `json.dumps()` (line 793) tries to serialize the result dict containing those datetimes, it throws `TypeError: Object of type datetime is not JSON serializable`. The error was caught by the generic exception handler which marked every property as "failed".
+
+**Fix:** Changed `prop.model_dump()` → `prop.model_dump(mode="json")` which tells Pydantic to convert datetimes to ISO format strings before returning the dict.
+
+**Lesson:** Any Pydantic model with datetime fields will break `json.dumps()` if you use `model_dump()` without `mode="json"`. Always use `mode="json"` when the output is going into `json.dumps()`.
+
+**Git Commit:** `ea52342` - "Fix datetime serialization error in campaign processing"
+
 ### Recent Commits (This Period)
 - `96eda77` - Add durable persistence, worker queue, and email notifications
 - `7b67933` - Fix rq Connection import removed in newer versions
 - `0c51c92` - Switch email provider from SendGrid to Resend
+- `88ce77b` - Update CLAUDE.md with Feb 2026 session
+- `ea52342` - Fix datetime serialization error in campaign processing
 
-### Testing Status
-- ⏳ Email delivery — awaiting user test results
+### Testing Status — FULLY VERIFIED Feb 11, 2026
+- ✅ CSV upload → works
+- ✅ Stripe payment → works
+- ✅ Geocoding (Google Maps) → works
+- ✅ Street View fetching → works (with front-facing heading calculation)
+- ✅ Gemini AI scoring → works
+- ✅ Results saved to PostgreSQL → works
+- ✅ Email notification via Resend → works (results@prospect-grid.com)
+- ✅ Results page displays scored properties → works
+- ✅ **Full end-to-end: 11 properties, 0 failures**
+
+### Known Issues / TODO
+- ⚠️ No deduplication — submitting the same CSV charges again (no free re-run for failed campaigns)
+- ⚠️ `GEMINI_API_KEY` is the actual env var name the code reads (`src/gemini_scorer.py:84`), NOT `GOOGLE_API_KEY` — make sure both are set on worker to be safe
 
 ---
 
