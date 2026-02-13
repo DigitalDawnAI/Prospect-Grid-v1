@@ -510,7 +510,7 @@ def verify_payment(stripe_session_id: str):
         if not queue:
             return jsonify({"error": "Queue unavailable"}), 500
 
-        queue.enqueue(process_campaign, campaign_id)
+        queue.enqueue(process_campaign, campaign_id, job_timeout=7200)
         logger.info(f"Enqueued background processing job for campaign {campaign_id}")
 
         return (
@@ -656,7 +656,7 @@ def start_processing(session_id: str):
         if not queue:
             return jsonify({"error": "Queue unavailable"}), 500
 
-        queue.enqueue(process_campaign, campaign_id)
+        queue.enqueue(process_campaign, campaign_id, job_timeout=7200)
         logger.info(f"Enqueued background processing job for campaign {campaign_id}")
 
         return (
@@ -700,7 +700,7 @@ def _score_placeholder(reason: str = "scoring_failed") -> dict:
     }
 
 
-PROCESSING_WORKERS = int(os.getenv("PROCESSING_WORKERS", "10"))
+PROCESSING_WORKERS = int(os.getenv("PROCESSING_WORKERS", "3"))
 
 
 def _process_single_property(campaign_id, raw_addr_dict, input_index):
