@@ -3,7 +3,7 @@ ProspectGrid Flask API
 Wraps existing geocoder, streetview, and scorer modules
 """
 
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, Response
 from flask_cors import CORS
 import uuid
 import csv
@@ -936,6 +936,50 @@ def get_results(campaign_id: str):
 
     except Exception as e:
         logger.error(f"Results fetch error: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/export/<campaign_id>", methods=["GET"])
+def export_csv(campaign_id: str):
+    """Export campaign results as a CSV file with structured address columns."""
+    try:
+        campaign = _load_campaign_payload(campaign_id)
+        if not campaign:
+            return jsonify({"error": "Campaign not found"}), 404
+
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow([
+            "Address", "City", "State", "ZIP",
+            "Score", "Confidence", "Status",
+            "Street View URL", "Reasoning",
+        ])
+
+        for prop in campaign.get("properties", []):
+            address = prop.get("address_street") or prop.get("input_address", "")
+            writer.writerow([
+                address,
+                prop.get("city", ""),
+                prop.get("state", ""),
+                prop.get("zip", ""),
+                prop.get("property_score") or prop.get("prospect_score", ""),
+                prop.get("confidence_level") or prop.get("confidence", ""),
+                prop.get("processing_status") or prop.get("status", ""),
+                prop.get("streetview_url", ""),
+                prop.get("score_reasoning") or prop.get("reasoning", ""),
+            ])
+
+        csv_data = output.getvalue()
+        return Response(
+            csv_data,
+            mimetype="text/csv",
+            headers={
+                "Content-Disposition": f"attachment; filename=prospect-grid-{campaign_id[:8]}.csv"
+            },
+        )
+
+    except Exception as e:
+        logger.error(f"CSV export error: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
 
 
