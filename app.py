@@ -250,8 +250,9 @@ def upload_csv():
 
         if not addresses:
             return jsonify({"error": "No valid addresses found", "details": errors}), 400
-        if len(addresses) > 500:
-            return jsonify({"error": "Maximum 500 addresses per upload"}), 400
+        max_upload = int(os.getenv("MAX_UPLOAD_ADDRESSES", "10000"))
+        if len(addresses) > max_upload:
+            return jsonify({"error": f"Maximum {max_upload} addresses per upload"}), 400
 
         session_id = str(uuid.uuid4())
         session_data = {
@@ -510,7 +511,7 @@ def verify_payment(stripe_session_id: str):
         if not queue:
             return jsonify({"error": "Queue unavailable"}), 500
 
-        queue.enqueue(process_campaign, campaign_id, job_timeout=7200)
+        queue.enqueue(process_campaign, campaign_id, job_timeout=14400)
         logger.info(f"Enqueued background processing job for campaign {campaign_id}")
 
         return (
@@ -656,7 +657,7 @@ def start_processing(session_id: str):
         if not queue:
             return jsonify({"error": "Queue unavailable"}), 500
 
-        queue.enqueue(process_campaign, campaign_id, job_timeout=7200)
+        queue.enqueue(process_campaign, campaign_id, job_timeout=14400)
         logger.info(f"Enqueued background processing job for campaign {campaign_id}")
 
         return (
@@ -700,7 +701,7 @@ def _score_placeholder(reason: str = "scoring_failed") -> dict:
     }
 
 
-PROCESSING_WORKERS = int(os.getenv("PROCESSING_WORKERS", "3"))
+PROCESSING_WORKERS = int(os.getenv("PROCESSING_WORKERS", "5"))
 
 
 def _process_single_property(campaign_id, raw_addr_dict, input_index):
