@@ -134,6 +134,13 @@ def send_results_email(email: str, campaign_id: str) -> None:
         logger.error(f"Failed to send results email: {e}", exc_info=True)
 
 
+def _sanitize_address(prop: dict) -> dict:
+    """Strip ', USA' suffix from address_full for display."""
+    if "address_full" in prop and isinstance(prop["address_full"], str):
+        prop["address_full"] = prop["address_full"].removesuffix(", USA")
+    return prop
+
+
 def _load_campaign_payload(campaign_id: str) -> dict | None:
     db = SessionLocal()
     try:
@@ -163,7 +170,7 @@ def _load_campaign_payload(campaign_id: str) -> dict | None:
         for _, prop, payload in parsed:
             result = payload.get("result")
             if result is not None:
-                properties.append(result)
+                properties.append(_sanitize_address(result))
             else:
                 properties.append(
                     {
