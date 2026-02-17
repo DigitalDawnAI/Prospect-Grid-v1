@@ -183,8 +183,8 @@ class Geocoder:
             for comp in result["address_components"]
         }
 
-        # Get formatted address
-        formatted_address = result["formatted_address"]
+        # Get formatted address (strip country suffix for US addresses)
+        formatted_address = result["formatted_address"].removesuffix(", USA")
 
         # Extract specific fields
         street_number = components.get("street_number", "")
