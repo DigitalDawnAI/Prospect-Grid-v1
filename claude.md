@@ -9,6 +9,99 @@ ProspectGrid is a Flask-based REST API that processes real estate addresses thro
 
 ---
 
+## Session: February 19, 2026 - Worker Stability Fixes & Per-Property Queue Refactor Plan
+
+### What Was Done
+
+**Bug: Campaigns freezing on Railway worker restart**
+
+Railway sends SIGTERM to workers during every deploy. Any campaign mid-flight gets killed and left stuck in `processing` state with remaining properties as `pending` — no worker picks them back up. Clients see a frozen progress bar forever.
+
+**Fixes shipped (all merged to `main`):**
+
+1. **`/api/resume/<campaign_id>` endpoint** (commit `c6e5884`)
+   - `POST /api/resume/<campaign_id>` re-enqueues a stuck campaign
+   - Resets non-terminal properties back to `pending`
+   - Safe to call multiple times — skips already-completed properties
+   - Used as a building block for the two fixes below
+
+2. **Auto-resume on worker startup** (commit `6e4d619`)
+   - `worker.py`: on startup, scans DB for campaigns in `processing` state created within last 24 hours
+   - Re-enqueues them automatically — no user action needed
+   - Railway restarts now self-heal
+   - **24-hour window** (commit `0402a57`) prevents accidentally re-processing old historical campaigns
+
+3. **Worker name collision fix** (commit `1007dc4`)
+   - PIDs get reused after restart, causing `ValueError: active worker named X already exists`
+   - Fix: append a random 6-char hex ID to each worker name (`worker-0-a3f9c2`) so names are always unique across restarts
+
+4. **Resume button on processing page** (frontend commit `dfcfa8d`)
+   - After 2 minutes of no progress change, yellow warning banner appears
+   - "Resume Processing" button calls `POST /api/resume/<campaign_id>`
+   - Fallback for edge cases where auto-resume doesn't catch it
+   - After clicking, banner updates with confirmation and polling continues
+
+### Known Issue / Gotcha Discovered
+- Each backend push triggers a Railway worker redeploy (SIGTERM), which kills active campaigns
+- Try to batch backend changes and deploy during off-hours when no campaigns are running
+- The auto-resume handles recovery, but it adds latency
+
+---
+
+### Planned Refactor: Per-Property Queue Architecture
+
+**Why this is needed:** The system is being built for multiple clients running large campaigns simultaneously. The current architecture has a fundamental fairness problem.
+
+**Current problem:**
+- 1 RQ job per campaign — one worker locked to that campaign until all properties finish
+- A client submitting 5,000 properties monopolizes a worker for hours, blocking everyone else
+- A client with 50 properties could wait hours behind that
+
+**Proposed architecture:**
+- 1 RQ job per property — all clients' properties interleaved in the queue
+- 10 workers process whichever 10 properties are next, regardless of campaign/client
+- No single campaign can starve others
+
+**What changes:**
+
+| File | Change |
+|------|--------|
+| `app.py` | New `process_property_job(campaign_id, property_id)` replaces `process_campaign()`. Processes one property, then checks atomically if it's the last — if so, marks campaign complete and sends email. |
+| `app.py` | Campaign creation enqueues N property jobs instead of 1 campaign job |
+| `app.py` | Resume endpoint re-enqueues pending property jobs instead of whole campaign |
+| `worker.py` | Auto-resume re-enqueues pending property jobs instead of whole campaigns |
+| `worker.py` | `PROCESSING_WORKERS` / `ThreadPoolExecutor` removed — RQ handles parallelism natively |
+| Frontend | No changes |
+| DB models | No changes |
+| Stripe/payment | No changes |
+
+**Key implementation detail — completion race condition:**
+When the last property finishes, two workers could simultaneously think they're last. Protect with an atomic DB update:
+```sql
+UPDATE campaigns SET status='completed'
+WHERE id=X AND status='processing'
+RETURNING id
+```
+Only the worker that gets the row back sends the email.
+
+**Benefits:**
+- Fair scheduling across all clients
+- Stuck recovery only re-queues pending properties (not whole campaign)
+- Scale limited only by # of Railway worker replicas, not `PROCESSING_WORKERS` threads
+- Simpler worker code (no ThreadPoolExecutor)
+
+**Risks to test:**
+- Completion detection correctness (atomic check)
+- Email fires exactly once per campaign
+- Resume correctness after partial completion
+- Enqueueing 5,000+ jobs at once (fine for Redis/RQ but worth load testing)
+
+**Scope:** ~150 lines of changes in `app.py` and `worker.py`. 1-2 hour implementation session.
+
+**Status: PLANNED — not yet implemented. Tackle when ready to scale for real client volume.**
+
+---
+
 ## Session: February 17, 2026 - UI Polish: Address Columns, Zip, Nav Links, Pricing
 
 ### What Was Done
