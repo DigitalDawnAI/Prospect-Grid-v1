@@ -19,11 +19,34 @@ import logging
 
 from redis import Redis
 from rq import Worker, Queue
+from sqlalchemy import select
 
 import app  # noqa: F401  — registers process_campaign so RQ can find it
+from app import SessionLocal, Campaign, process_campaign
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+def resume_stuck_campaigns(queue: Queue) -> None:
+    """Re-enqueue any campaigns stuck in 'processing' state from a previous worker crash."""
+    db = SessionLocal()
+    try:
+        stuck = db.execute(
+            select(Campaign).where(Campaign.status == "processing")
+        ).scalars().all()
+
+        if not stuck:
+            logger.info("No stuck campaigns found on startup.")
+            return
+
+        for campaign in stuck:
+            queue.enqueue(process_campaign, str(campaign.id), job_timeout=14400)
+            logger.info(f"Auto-resumed stuck campaign {campaign.id} on worker startup")
+    except Exception as e:
+        logger.error(f"Error checking for stuck campaigns: {e}", exc_info=True)
+    finally:
+        db.close()
 
 
 def run_single_worker(worker_id: int) -> None:
@@ -43,6 +66,13 @@ def run_single_worker(worker_id: int) -> None:
 def main() -> None:
     concurrency = int(os.getenv("WORKER_CONCURRENCY", "10"))
     logger.info(f"Starting {concurrency} RQ worker process(es)")
+
+    redis_url = os.getenv("REDIS_URL")
+    if not redis_url:
+        raise RuntimeError("REDIS_URL not configured")
+    startup_conn = Redis.from_url(redis_url)
+    startup_queue = Queue("default", connection=startup_conn)
+    resume_stuck_campaigns(startup_queue)
 
     if concurrency <= 1:
         run_single_worker(0)
