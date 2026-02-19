@@ -17,6 +17,7 @@ import sys
 import multiprocessing
 import logging
 import uuid
+from datetime import datetime
 
 from redis import Redis
 from rq import Worker, Queue
@@ -30,11 +31,19 @@ logger = logging.getLogger(__name__)
 
 
 def resume_stuck_campaigns(queue: Queue) -> None:
-    """Re-enqueue any campaigns stuck in 'processing' state from a previous worker crash."""
+    """Re-enqueue campaigns stuck in 'processing' state from a previous worker crash.
+    Only considers campaigns created within the last 24 hours to avoid
+    accidentally re-processing old historical campaigns."""
+    from datetime import timedelta
+    cutoff = datetime.utcnow() - timedelta(hours=24)
+
     db = SessionLocal()
     try:
         stuck = db.execute(
-            select(Campaign).where(Campaign.status == "processing")
+            select(Campaign).where(
+                Campaign.status == "processing",
+                Campaign.created_at >= cutoff,
+            )
         ).scalars().all()
 
         if not stuck:
