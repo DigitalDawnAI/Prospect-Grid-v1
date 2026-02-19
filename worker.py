@@ -16,6 +16,7 @@ import signal
 import sys
 import multiprocessing
 import logging
+import uuid
 
 from redis import Redis
 from rq import Worker, Queue
@@ -58,8 +59,9 @@ def run_single_worker(worker_id: int) -> None:
     conn = Redis.from_url(redis_url)
     queues = [Queue("default", connection=conn)]
 
+    startup_uid = uuid.uuid4().hex[:6]
     logger.info(f"Worker-{worker_id} starting (PID {os.getpid()})")
-    w = Worker(queues, connection=conn, name=f"worker-{worker_id}-{os.getpid()}")
+    w = Worker(queues, connection=conn, name=f"worker-{worker_id}-{startup_uid}")
     w.work()
 
 
