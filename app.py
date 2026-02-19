@@ -894,6 +894,47 @@ def process_campaign(campaign_id: str):
         db.close()
 
 
+@app.route("/api/resume/<campaign_id>", methods=["POST"])
+def resume_campaign(campaign_id: str):
+    """Re-enqueue a stuck campaign (e.g. after a worker restart mid-flight).
+    Safe to call multiple times — process_campaign skips already-completed properties."""
+    try:
+        db = SessionLocal()
+        try:
+            campaign_uuid = uuid.UUID(campaign_id)
+            campaign = db.get(Campaign, campaign_uuid)
+            if not campaign:
+                return jsonify({"error": "Campaign not found"}), 404
+            if campaign.status == "completed":
+                return jsonify({"error": "Campaign already completed"}), 400
+            # Reset any properties stuck in mid-flight state back to pending
+            props = (
+                db.execute(select(Property).where(Property.campaign_id == campaign.id))
+                .scalars()
+                .all()
+            )
+            reset_count = 0
+            for prop in props:
+                if prop.status not in ("completed", "failed"):
+                    prop.status = "pending"
+                    reset_count += 1
+            campaign.status = "processing"
+            db.commit()
+        finally:
+            db.close()
+
+        queue.enqueue(process_campaign, campaign_id, job_timeout=14400)
+        logger.info(f"Re-enqueued campaign {campaign_id} ({reset_count} properties reset to pending)")
+        return jsonify({
+            "campaign_id": campaign_id,
+            "status": "re-enqueued",
+            "properties_reset": reset_count,
+        }), 200
+    except Exception as e:
+        logger.error(f"Error resuming campaign {campaign_id}: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/status/<campaign_id>", methods=["GET"])
 def get_status(campaign_id: str):
     try:
