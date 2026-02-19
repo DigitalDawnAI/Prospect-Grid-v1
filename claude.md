@@ -9,6 +9,48 @@ ProspectGrid is a Flask-based REST API that processes real estate addresses thro
 
 ---
 
+## Session: February 17, 2026 - UI Polish: Address Columns, Zip, Nav Links, Pricing
+
+### What Was Done
+
+**Backend (`Prospect-Grid-v1`)**
+
+PR #12 — merged from previous session, landed today:
+- `src/geocoder.py`: Strip `, USA` suffix from `address_full` at parse time
+- `app.py`: `_sanitize_address()` strips `, USA` from persisted data before API responses
+
+**Frontend (`prospect-grid-web`)**
+
+All three commits pushed to `main` and auto-deployed via Vercel.
+
+1. **Street column fix** (commit `3133de1`)
+   - `Property` interface: added `address_street?: string`
+   - Results table column header: `Address` → `Street`
+   - Table cell + frontend CSV export: now use `address_street ?? address_full` instead of `address_full`
+   - Frontend CSV export header: `Address` → `Street`
+
+2. **UI polish** (commit `65b3e94`)
+   - Results page: `ProspectGrid` text is now an `<a>` link → `https://www.prospect-grid.com`
+   - Processing page: same ProspectGrid link fix
+   - Results table: added **Zip** column between State and Overall Score (header + cell + colSpan bump 7→8)
+
+3. **Pricing cleanup** (commit `e6c4dc7`)
+   - Removed outdated `$0.04–$0.08` range (was tied to deprecated multi-tier system)
+   - Set single flat price: **$0.05 per property**
+   - Added volume contact note: `Volume pricing available — contact dev@prospect-grid.com`
+   - Updated both "Simple Pricing" card and main "Transparent Pricing" section
+
+### Cost Analysis (for reference)
+- Raw API cost per property: **~$0.012** ($0.005 geocoding + $0.007 Street View + ~$0.0001 Gemini)
+- $0.05 price = ~4.2× markup
+- Google Maps $200/month free credit covers ~16,600 properties before any Maps cost
+- Gemini 2.5 Flash free tier: 1,500 req/day (~45,000/month)
+
+### Known TODO (changes4.png)
+- Homepage pricing section: font size balance between `$0.05` and contact note — "make them both fit within the space sensibly"
+
+---
+
 ## Session: February 10-11, 2026 - Email Notifications, SendGrid → Resend, Full Pipeline Working
 
 ### Context
